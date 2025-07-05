@@ -56,7 +56,7 @@ model_v = Qwen2_5_VLForConditionalGeneration.from_pretrained(
     torch_dtype=torch.float16
 ).to(device).eval()
 
-# Load aya-vision-8b
+# Load Aya-Vision-8b
 MODEL_ID_A = "CohereForAI/aya-vision-8b"
 processor_a = AutoProcessor.from_pretrained(MODEL_ID_A, trust_remote_code=True)
 model_a = AutoModelForImageTextToText.from_pretrained(
@@ -95,11 +95,12 @@ def generate_image(model_name: str, text: str, image: Image.Image,
                    repetition_penalty: float = 1.2):
     """
     Generates responses using the selected model for image input.
+    Yields raw text and Markdown-formatted text.
     """
     if model_name == "RolmOCR":
         processor = processor_m
         model = model_m
-    elif model_name == "Qwen2-VL-OCR-2B-Instruct":
+    elif model_name == "Qwen2-VL-OCR":
         processor = processor_x
         model = model_x
     elif model_name == "Nanonets-OCR-s":
@@ -109,11 +110,11 @@ def generate_image(model_name: str, text: str, image: Image.Image,
         processor = processor_a
         model = model_a
     else:
-        yield "Invalid model selected."
+        yield "Invalid model selected.", "Invalid model selected."
         return
 
     if image is None:
-        yield "Please upload an image."
+        yield "Please upload an image.", "Please upload an image."
         return
 
     messages = [{
@@ -141,7 +142,7 @@ def generate_image(model_name: str, text: str, image: Image.Image,
         buffer += new_text
         buffer = buffer.replace("<|im_end|>", "")
         time.sleep(0.01)
-        yield buffer
+        yield buffer, buffer
 
 @spaces.GPU
 def generate_video(model_name: str, text: str, video_path: str,
@@ -152,11 +153,12 @@ def generate_video(model_name: str, text: str, video_path: str,
                    repetition_penalty: float = 1.2):
     """
     Generates responses using the selected model for video input.
+    Yields raw text and Markdown-formatted text.
     """
     if model_name == "RolmOCR":
         processor = processor_m
         model = model_m
-    elif model_name == "Qwen2-VL-OCR-2B-Instruct":
+    elif model_name == "Qwen2-VL-OCR":
         processor = processor_x
         model = model_x
     elif model_name == "Nanonets-OCR-s":
@@ -166,11 +168,11 @@ def generate_video(model_name: str, text: str, video_path: str,
         processor = processor_a
         model = model_a
     else:
-        yield "Invalid model selected."
+        yield "Invalid model selected.", "Invalid model selected."
         return
 
     if video_path is None:
-        yield "Please upload a video."
+        yield "Please upload a video.", "Please upload a video."
         return
 
     frames = downsample_video(video_path)
@@ -209,10 +211,11 @@ def generate_video(model_name: str, text: str, video_path: str,
         buffer += new_text
         buffer = buffer.replace("<|im_end|>", "")
         time.sleep(0.01)
-        yield buffer
+        yield buffer, buffer
 
 # Define examples for image and video inference
 image_examples = [
+    ["Convert this page to doc [table] precisely for markdown.", "images/0.png"],
     ["Perform OCR on the Image.", "images/1.jpg"],
     ["Extract the table content", "images/2.png"]
 ]
@@ -230,11 +233,16 @@ css = """
 .submit-btn:hover {
     background-color: #3498db !important;
 }
+.canvas-output {
+    border: 2px solid #4682B4;
+    border-radius: 10px;
+    padding: 20px;
+}
 """
 
 # Create the Gradio Interface
 with gr.Blocks(css=css, theme="bethecloud/storj_theme") as demo:
-    gr.Markdown("# **Multimodal OCR**")
+    gr.Markdown("# **[Multimodal OCR](https://huggingface.co/collections/prithivMLmods/multimodal-implementations-67c9982ea04b39f0608badb0)**")
     with gr.Row():
         with gr.Column():
             with gr.Tabs():
@@ -261,28 +269,33 @@ with gr.Blocks(css=css, theme="bethecloud/storj_theme") as demo:
                 top_k = gr.Slider(label="Top-k", minimum=1, maximum=1000, step=1, value=50)
                 repetition_penalty = gr.Slider(label="Repetition penalty", minimum=1.0, maximum=2.0, step=0.05, value=1.2)
         with gr.Column():
-            output = gr.Textbox(label="Output", interactive=False, lines=2, scale=2)
+            with gr.Column(elem_classes="canvas-output"):
+                gr.Markdown("## Result.Md")
+                output = gr.Textbox(label="Raw Output Stream", interactive=False, lines=2)
+                #format[ft.md]
+                with gr.Accordion("Formatted Result (Result.md)", open=False):
+                    markdown_output = gr.Markdown(label="Formatted Result (Result.Md)")
             model_choice = gr.Radio(
-                choices=["Nanonets-OCR-s", "Qwen2-VL-OCR-2B-Instruct", "RolmOCR", "Aya-Vision"],
+                choices=["Nanonets-OCR-s", "Qwen2-VL-OCR", "RolmOCR", "Aya-Vision"],
                 label="Select Model",
                 value="Nanonets-OCR-s"
             )
-            
-            gr.Markdown("**Model Info**")
+            gr.Markdown("**Model Info 💻** | [Report Bug](https://huggingface.co/spaces/prithivMLmods/Multimodal-OCR/discussions)")
             gr.Markdown("> [Qwen2-VL-OCR-2B-Instruct](https://huggingface.co/prithivMLmods/Qwen2-VL-OCR-2B-Instruct): qwen2-vl-ocr-2b-instruct model is a fine-tuned version of qwen2-vl-2b-instruct, tailored for tasks that involve [messy] optical character recognition (ocr), image-to-text conversion, and math problem solving with latex formatting.")
             gr.Markdown("> [Nanonets-OCR-s](https://huggingface.co/nanonets/Nanonets-OCR-s): nanonets-ocr-s is a powerful, state-of-the-art image-to-markdown ocr model that goes far beyond traditional text extraction. it transforms documents into structured markdown with intelligent content recognition and semantic tagging.")
-            gr.Markdown("> [RolmOCR](https://huggingface.co/reducto/RolmOCR): rolmocr, high-quality, openly available approach to parsing pdfs and other complex documents oprical character recognition. it is designed to handle a wide range of document types, including scanned documents, handwritten text, and complex layouts.")
+            gr.Markdown("> [RolmOCR](https://huggingface.co/reducto/RolmOCR): rolmocr, high-quality, openly available approach to parsing pdfs and other complex documents optical character recognition. it is designed to handle a wide range of document types, including scanned documents, handwritten text, and complex layouts.")
             gr.Markdown("> [Aya-Vision](https://huggingface.co/CohereLabs/aya-vision-8b): cohere labs aya vision 8b is an open weights research release of an 8-billion parameter model with advanced capabilities optimized for a variety of vision-language use cases, including ocr, captioning, visual reasoning, summarization, question answering, code, and more.")
-
+            gr.Markdown(">⚠️note: all the models in space are not guaranteed to perform well in video inference use cases.")
+        
     image_submit.click(
         fn=generate_image,
         inputs=[model_choice, image_query, image_upload, max_new_tokens, temperature, top_p, top_k, repetition_penalty],
-        outputs=output
+        outputs=[output, markdown_output]
     )
     video_submit.click(
         fn=generate_video,
         inputs=[model_choice, video_query, video_upload, max_new_tokens, temperature, top_p, top_k, repetition_penalty],
-        outputs=output
+        outputs=[output, markdown_output]
     )
 
 if __name__ == "__main__":
