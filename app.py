@@ -22,6 +22,22 @@ from transformers import (
 )
 from transformers.image_utils import load_image
 
+#theme:custom
+#custom_theme = gr.themes.Base(
+#    primary_hue="indigo",
+#    secondary_hue="violet",
+#    neutral_hue="gray"
+#).set(
+#    body_background_fill="#f7f5fa",
+#    body_text_color="#1f1f1f",
+#    input_background_fill="#ffffff",
+#    button_primary_background_fill="#8b5cf6",
+#    button_primary_text_color="#ffffff",
+#    button_secondary_background_fill="#e0d7f5",
+#    button_secondary_text_color="#1f1f1f",
+#    shadow_spread="sm"
+#)
+
 # Constants for text generation
 MAX_MAX_NEW_TOKENS = 2048
 DEFAULT_MAX_NEW_TOKENS = 1024
@@ -29,11 +45,11 @@ MAX_INPUT_TOKEN_LENGTH = int(os.getenv("MAX_INPUT_TOKEN_LENGTH", "4096"))
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# Load RolmOCR
-MODEL_ID_M = "reducto/RolmOCR"
-processor_m = AutoProcessor.from_pretrained(MODEL_ID_M, trust_remote_code=True)
-model_m = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-    MODEL_ID_M,
+# Load Nanonets-OCR-s
+MODEL_ID_V = "nanonets/Nanonets-OCR-s"
+processor_v = AutoProcessor.from_pretrained(MODEL_ID_V, trust_remote_code=True)
+model_v = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    MODEL_ID_V,
     trust_remote_code=True,
     torch_dtype=torch.float16
 ).to(device).eval()
@@ -47,20 +63,29 @@ model_x = Qwen2VLForConditionalGeneration.from_pretrained(
     torch_dtype=torch.float16
 ).to(device).eval()
 
-# Load Nanonets-OCR-s
-MODEL_ID_V = "nanonets/Nanonets-OCR-s"
-processor_v = AutoProcessor.from_pretrained(MODEL_ID_V, trust_remote_code=True)
-model_v = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-    MODEL_ID_V,
-    trust_remote_code=True,
-    torch_dtype=torch.float16
-).to(device).eval()
-
 # Load Aya-Vision-8b
 MODEL_ID_A = "CohereForAI/aya-vision-8b"
 processor_a = AutoProcessor.from_pretrained(MODEL_ID_A, trust_remote_code=True)
 model_a = AutoModelForImageTextToText.from_pretrained(
     MODEL_ID_A,
+    trust_remote_code=True,
+    torch_dtype=torch.float16
+).to(device).eval()
+
+# Load Lh41-1042-Magellanic-7B-0711
+MODEL_ID_W = "prithivMLmods/Lh41-1042-Magellanic-7B-0711"
+processor_w = AutoProcessor.from_pretrained(MODEL_ID_W, trust_remote_code=True)
+model_w = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    MODEL_ID_W, 
+    trust_remote_code=True,
+    torch_dtype=torch.float16
+).to(device).eval()
+
+# Load RolmOCR
+MODEL_ID_M = "reducto/RolmOCR"
+processor_m = AutoProcessor.from_pretrained(MODEL_ID_M, trust_remote_code=True)
+model_m = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    MODEL_ID_M,
     trust_remote_code=True,
     torch_dtype=torch.float16
 ).to(device).eval()
@@ -97,18 +122,21 @@ def generate_image(model_name: str, text: str, image: Image.Image,
     Generates responses using the selected model for image input.
     Yields raw text and Markdown-formatted text.
     """
-    if model_name == "RolmOCR":
+    if model_name == "RolmOCR-7B":
         processor = processor_m
         model = model_m
-    elif model_name == "Qwen2-VL-OCR":
+    elif model_name == "Qwen2-VL-OCR-2B":
         processor = processor_x
         model = model_x
     elif model_name == "Nanonets-OCR-s":
         processor = processor_v
         model = model_v
-    elif model_name == "Aya-Vision":
+    elif model_name == "Aya-Vision-8B":
         processor = processor_a
         model = model_a
+    elif model_name == "Lh41-1042-Magellanic-7B-0711":
+        processor = processor_w
+        model = model_w
     else:
         yield "Invalid model selected.", "Invalid model selected."
         return
@@ -155,18 +183,21 @@ def generate_video(model_name: str, text: str, video_path: str,
     Generates responses using the selected model for video input.
     Yields raw text and Markdown-formatted text.
     """
-    if model_name == "RolmOCR":
+    if model_name == "RolmOCR-7B":
         processor = processor_m
         model = model_m
-    elif model_name == "Qwen2-VL-OCR":
+    elif model_name == "Qwen2-VL-OCR-2B":
         processor = processor_x
         model = model_x
     elif model_name == "Nanonets-OCR-s":
         processor = processor_v
         model = model_v
-    elif model_name == "Aya-Vision":
+    elif model_name == "Aya-Vision-8B":
         processor = processor_a
         model = model_a
+    elif model_name == "Lh41-1042-Magellanic-7B-0711":
+        processor = processor_w
+        model = model_w
     else:
         yield "Invalid model selected.", "Invalid model selected."
         return
@@ -215,6 +246,8 @@ def generate_video(model_name: str, text: str, video_path: str,
 
 # Define examples for image and video inference
 image_examples = [
+    ["Extract the content", "images/4.png"],          
+    ["Explain the scene", "images/3.jpg"],       
     ["Convert this page to doc [table] precisely for markdown.", "images/0.png"],
     ["Perform OCR on the Image.", "images/1.jpg"],
     ["Extract the table content", "images/2.png"]
@@ -268,21 +301,24 @@ with gr.Blocks(css=css, theme="bethecloud/storj_theme") as demo:
                 top_p = gr.Slider(label="Top-p (nucleus sampling)", minimum=0.05, maximum=1.0, step=0.05, value=0.9)
                 top_k = gr.Slider(label="Top-k", minimum=1, maximum=1000, step=1, value=50)
                 repetition_penalty = gr.Slider(label="Repetition penalty", minimum=1.0, maximum=2.0, step=0.05, value=1.2)
+                
         with gr.Column():
             with gr.Column(elem_classes="canvas-output"):
-                gr.Markdown("## Result.Md")
-                output = gr.Textbox(label="Raw Output Stream", interactive=False, lines=2)
+                gr.Markdown("## Output")
+                output = gr.Textbox(label="Raw Output Stream", interactive=False, lines=2, show_copy_button=True)
                 #format[ft.md]
-                with gr.Accordion("Formatted Result (Result.md)", open=False):
+                with gr.Accordion("(Result.md)", open=False):
                     markdown_output = gr.Markdown(label="Formatted Result (Result.Md)")
             model_choice = gr.Radio(
-                choices=["Nanonets-OCR-s", "Qwen2-VL-OCR", "RolmOCR", "Aya-Vision"],
+                choices=["Nanonets-OCR-s", "Qwen2-VL-OCR-2B", "RolmOCR-7B", 
+                         "Lh41-1042-Magellanic-7B-0711", "Aya-Vision-8B"],
                 label="Select Model",
                 value="Nanonets-OCR-s"
             )
             gr.Markdown("**Model Info 💻** | [Report Bug](https://huggingface.co/spaces/prithivMLmods/Multimodal-OCR/discussions)")
-            gr.Markdown("> [Qwen2-VL-OCR-2B-Instruct](https://huggingface.co/prithivMLmods/Qwen2-VL-OCR-2B-Instruct): qwen2-vl-ocr-2b-instruct model is a fine-tuned version of qwen2-vl-2b-instruct, tailored for tasks that involve [messy] optical character recognition (ocr), image-to-text conversion, and math problem solving with latex formatting.")
             gr.Markdown("> [Nanonets-OCR-s](https://huggingface.co/nanonets/Nanonets-OCR-s): nanonets-ocr-s is a powerful, state-of-the-art image-to-markdown ocr model that goes far beyond traditional text extraction. it transforms documents into structured markdown with intelligent content recognition and semantic tagging.")
+            gr.Markdown("> [Lh41-1042-Magellanic-7B-0711](https://huggingface.co/prithivMLmods/Lh41-1042-Magellanic-7B-0711): lh41-1042-magellanic-7b-0711 model is a fine-tuned version of qwen2.5-vl-7b-instruct, optimized for image captioning, visual analysis, and image reasoning. built on top of the qwen2.5-vl, this experimental model enhances visual comprehension, focused training on 3,000k image pairs for superior image understanding")
+            gr.Markdown("> [Qwen2-VL-OCR-2B](https://huggingface.co/prithivMLmods/Qwen2-VL-OCR-2B-Instruct): qwen2-vl-ocr-2b-instruct model is a fine-tuned version of qwen2-vl-2b-instruct, tailored for tasks that involve [messy] optical character recognition (ocr), image-to-text conversion, and math problem solving with latex formatting.")
             gr.Markdown("> [RolmOCR](https://huggingface.co/reducto/RolmOCR): rolmocr, high-quality, openly available approach to parsing pdfs and other complex documents optical character recognition. it is designed to handle a wide range of document types, including scanned documents, handwritten text, and complex layouts.")
             gr.Markdown("> [Aya-Vision](https://huggingface.co/CohereLabs/aya-vision-8b): cohere labs aya vision 8b is an open weights research release of an 8-billion parameter model with advanced capabilities optimized for a variety of vision-language use cases, including ocr, captioning, visual reasoning, summarization, question answering, code, and more.")
             gr.Markdown(">⚠️note: all the models in space are not guaranteed to perform well in video inference use cases.")
