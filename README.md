@@ -16,7 +16,7 @@
 1. **Nanonets-OCR-s**: State-of-the-art image-to-markdown OCR with intelligent content recognition
 2. **Qwen2-VL-OCR-2B**: Specialized for messy OCR, image-to-text conversion, and math problem solving
 3. **RolmOCR-7B**: High-quality document parsing for PDFs and complex layouts
-4. **Lh41-1042-Magellanic-7B**: Fine-tuned for image captioning and visual analysis
+4. **olmOCR-7B-0725**: fine-tuned with olmocr-mix-0225 on top of Qwen2.5-VL-7B-Instruct
 5. **Aya-Vision-8B**: Multi-purpose vision-language model with advanced reasoning capabilities
 
 ## Installation
