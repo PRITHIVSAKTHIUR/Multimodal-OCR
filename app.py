@@ -22,22 +22,6 @@ from transformers import (
 )
 from transformers.image_utils import load_image
 
-#theme:custom
-#custom_theme = gr.themes.Base(
-#    primary_hue="indigo",
-#    secondary_hue="violet",
-#    neutral_hue="gray"
-#).set(
-#    body_background_fill="#f7f5fa",
-#    body_text_color="#1f1f1f",
-#    input_background_fill="#ffffff",
-#    button_primary_background_fill="#8b5cf6",
-#    button_primary_text_color="#ffffff",
-#    button_secondary_background_fill="#e0d7f5",
-#    button_secondary_text_color="#1f1f1f",
-#    shadow_spread="sm"
-#)
-
 # Constants for text generation
 MAX_MAX_NEW_TOKENS = 2048
 DEFAULT_MAX_NEW_TOKENS = 1024
@@ -307,9 +291,10 @@ with gr.Blocks(css=css, theme="bethecloud/storj_theme") as demo:
             with gr.Column(elem_classes="canvas-output"):
                 gr.Markdown("## Output")
                 output = gr.Textbox(label="Raw Output Stream", interactive=False, lines=2, show_copy_button=True)
-                #format[ft.md]
+
                 with gr.Accordion("(Result.md)", open=False):
                     markdown_output = gr.Markdown(label="Formatted Result (Result.Md)")
+                    
             model_choice = gr.Radio(
                 choices=["olmOCR-7B-0725", "Nanonets-OCR-s", "RolmOCR-7B", 
                          "Aya-Vision-8B", "Qwen2-VL-OCR-2B"],
@@ -322,7 +307,8 @@ with gr.Blocks(css=css, theme="bethecloud/storj_theme") as demo:
             gr.Markdown("> [Qwen2-VL-OCR-2B](https://huggingface.co/prithivMLmods/Qwen2-VL-OCR-2B-Instruct): qwen2-vl-ocr-2b-instruct model is a fine-tuned version of qwen2-vl-2b-instruct, tailored for tasks that involve [messy] optical character recognition (ocr), image-to-text conversion, and math problem solving with latex formatting.")
             gr.Markdown("> [RolmOCR](https://huggingface.co/reducto/RolmOCR): rolmocr, high-quality, openly available approach to parsing pdfs and other complex documents optical character recognition. it is designed to handle a wide range of document types, including scanned documents, handwritten text, and complex layouts.")
             gr.Markdown("> [Aya-Vision](https://huggingface.co/CohereLabs/aya-vision-8b): cohere labs aya vision 8b is an open weights research release of an 8-billion parameter model with advanced capabilities optimized for a variety of vision-language use cases, including ocr, captioning, visual reasoning, summarization, question answering, code, and more.")
-            gr.Markdown(">⚠️note: all the models in space are not guaranteed to perform well in video inference use cases.")
+            
+            gr.Markdown("> ⚠️ Note: Models in this space may not perform well on video inference tasks.")
         
     image_submit.click(
         fn=generate_image,
