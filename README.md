@@ -82,12 +82,6 @@ The application will launch a Gradio web interface accessible through your brows
 - **Model Selection**: Choose from five specialized models
 - **Real-time Processing**: Streaming responses with live output
 
-#### Video Inference Tab
-- **Video Upload**: Process video files for content analysis
-- **Temporal Understanding**: Frame-by-frame analysis with timestamps
-- **Content Extraction**: Detailed video descriptions and analysis
-- **Multi-frame Processing**: Intelligent frame sampling for comprehensive analysis
-
 ### Advanced Configuration Options
 - **Max New Tokens**: Control response length (1-2048)
 - **Temperature**: Adjust creativity and randomness (0.1-4.0)
@@ -108,15 +102,6 @@ Process image inputs with the selected model
   - `**kwargs`: Generation parameters (temperature, top_p, etc.)
 - **Returns**: Streaming tuple of (raw_output, markdown_output)
 
-#### `generate_video(model_name, text, video_path, **kwargs)`
-Analyze video content with temporal understanding
-- **Parameters**:
-  - `model_name`: Selected model identifier
-  - `text`: Query or instruction text
-  - `video_path`: Path to video file
-  - `**kwargs`: Generation parameters
-- **Returns**: Streaming tuple of (raw_output, markdown_output)
-
 ### Utility Functions
 
 #### `downsample_video(video_path)`
@@ -124,38 +109,6 @@ Extract representative frames from video files
 - **Parameters**: Path to video file
 - **Returns**: List of (PIL_image, timestamp) tuples
 - **Frame Sampling**: Extracts 10 evenly spaced frames
-
-## Model Specifications
-
-### Nanonets-OCR-s
-- **Architecture**: Advanced OCR with semantic tagging
-- **Strengths**: Document structure recognition, markdown conversion
-- **Use Cases**: Complex document analysis, table extraction
-- **Performance**: High accuracy on structured documents
-
-### Qwen2-VL-OCR-2B
-- **Architecture**: Qwen2-VL-2B-Instruct fine-tuned
-- **Strengths**: Messy OCR, mathematical content, LaTeX formatting
-- **Use Cases**: Handwritten text, mathematical equations, poor quality scans
-- **Performance**: Excellent on challenging OCR tasks
-
-### RolmOCR-7B
-- **Architecture**: Specialized document parsing model
-- **Strengths**: PDF processing, complex layouts, scanned documents
-- **Use Cases**: Digital document conversion, archive processing
-- **Performance**: Superior handling of document structure
-
-### Lh41-1042-Magellanic-7B
-- **Architecture**: Qwen2.5-VL-7B-Instruct fine-tuned
-- **Strengths**: Image captioning, visual analysis, reasoning
-- **Use Cases**: Scene understanding, visual description, content analysis
-- **Performance**: Trained on 3M image pairs for enhanced understanding
-
-### Aya-Vision-8B
-- **Architecture**: 8-billion parameter multimodal model
-- **Strengths**: Versatile vision-language tasks, code generation
-- **Use Cases**: General OCR, captioning, visual reasoning, summarization
-- **Performance**: Balanced performance across multiple tasks
 
 ## Examples
 
@@ -171,13 +124,6 @@ Extract representative frames from video files
 # Query: "Explain the scene"
 # Input: Complex image
 # Output: Detailed scene description with context
-```
-
-### Video Understanding
-```python
-# Query: "Identify the main actions in the cartoon video"
-# Input: Video file
-# Output: Temporal analysis of actions and events
 ```
 
 ### Mathematical Content
@@ -199,11 +145,6 @@ Extract representative frames from video files
 - Progressive result display
 - Reduced perceived latency
 
-### Video Processing
-- Intelligent frame sampling
-- Temporal timestamp preservation
-- Efficient memory usage
-
 ## Configuration
 
 ### Environment Variables
@@ -220,7 +161,6 @@ MAX_INPUT_TOKEN_LENGTH=4096  # Maximum input token length
 
 ## Limitations
 
-- Video inference performance varies across models
 - GPU memory requirements scale with model complexity
 - Processing time depends on input size and hardware capabilities
 - Some models may not perform optimally on video content
@@ -269,17 +209,4 @@ This project is licensed under the MIT License. See the LICENSE file for details
 For questions, issues, or feature requests:
 - Open an issue on GitHub
 - Check the model documentation on Hugging Face
-- Review the examples and API documentation
 - Join the discussion in the Hugging Face Space
-
-## Roadmap
-
-- [ ] Add support for additional OCR models
-- [ ] Implement batch processing capabilities
-- [ ] Add API endpoints for programmatic access
-- [ ] Enhance video processing with more frame sampling options
-- [ ] Add support for document format outputs (PDF, DOCX)
-
-## Citation
-
-If you use this work in your research or applications, please cite:
