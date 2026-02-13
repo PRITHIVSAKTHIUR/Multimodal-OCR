@@ -1,7 +1,14 @@
 # **Multimodal-OCR**
 
+> [!note]
+HF Demo: https://huggingface.co/spaces/prithivMLmods/Multimodal-OCR
 
 > A comprehensive multimodal OCR application that leverages state-of-the-art vision-language models for optical character recognition, document analysis, image captioning, and video understanding. This application provides a unified interface for multiple specialized models optimized for different OCR and vision tasks.
+
+<img width="1918" height="1669" alt="Screenshot 2026-02-13 at 15-49-12 Multimodal OCR - a Hugging Face Space by prithivMLmods" src="https://github.com/user-attachments/assets/00abc04c-4bb0-480a-a820-11b561892846" />
+
+> [!important] 
+note: remove kernels and flash_attn3 implementation if you are using it on *non-hopper* architecture gpus.
 
 ## Features
 
@@ -38,13 +45,24 @@ pip install -r requirements.txt
 
 ### Required Dependencies
 ```
-gradio
-spaces
-torch
-numpy
-pillow
+git+https://github.com/huggingface/transformers.git@v4.57.6
+git+https://github.com/huggingface/accelerate.git
+git+https://github.com/huggingface/peft.git
+transformers-stream-generator
+huggingface_hub
+qwen-vl-utils
+sentencepiece
 opencv-python
-transformers
+torch==2.8.0
+torchvision
+matplotlib
+requests
+kernels
+hf_xet
+spaces
+pillow
+gradio # - gradio@6.3.0
+av
 ```
 
 ## Usage
