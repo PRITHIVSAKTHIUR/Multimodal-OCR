@@ -1,50 +1,47 @@
 # **Multimodal-OCR**
 
-> [!note]
-HF Demo: https://huggingface.co/spaces/prithivMLmods/Multimodal-OCR
+Multimodal-OCR is an experimental, high-performance visual reasoning and optical character recognition suite designed to accurately extract text, analyze visual content, and parse complex document structures. Built upon a diverse ecosystem of cutting-edge vision-language models—including architectures based on Qwen2.5-VL, Qwen2-VL, and Cohere's Aya-Vision—this application excels at handling dense documents, multilingual texts, and real-world scene imagery. The suite features a highly customized, interactive web interface that enables users to effortlessly upload screenshots, receipts, and pages for rapid analysis. With built-in support for fully GPU-accelerated inference via Flash Attention 2 and granular manipulation of text generation parameters, Multimodal-OCR provides researchers and developers with a powerful, streamlined environment for testing and deploying robust multimodal AI workflows.
 
-> A comprehensive multimodal OCR application that leverages state-of-the-art vision-language models for optical character recognition, document analysis, image captioning, and video understanding. This application provides a unified interface for multiple specialized models optimized for different OCR and vision tasks.
+<img width="1920" height="1800" alt="Screenshot 2026-03-22 at 12-44-23 Multimodal OCR - a Hugging Face Space by prithivMLmods" src="https://github.com/user-attachments/assets/42b8c8f0-6903-4a83-96b8-04553fcc1df2" />
 
-<img width="1918" height="1669" alt="Screenshot 2026-02-13 at 15-49-12 Multimodal OCR - a Hugging Face Space by prithivMLmods" src="https://github.com/user-attachments/assets/00abc04c-4bb0-480a-a820-11b561892846" />
+### **Key Features**
 
-> [!important] 
-note: remove kernels and flash_attn3 implementation if you are using it on *non-hopper* architecture gpus.
+* **Multi-Model Architecture:** Seamlessly switch between specialized vision-language models directly from the interface. Supported models include `Nanonets-OCR2-3B`, `olmOCR-7B-0725`, `RolmOCR-7B`, `Aya-Vision-8B`, and `Qwen2-VL-OCR-2B`.
+* **Custom User Interface:** Features a bespoke, responsive Gradio frontend built with custom HTML, CSS, and JavaScript. It includes a drag-and-drop media zone, real-time output streaming, and an integrated advanced settings panel.
+* **Granular Inference Controls:** Fine-tune the AI's output by adjusting text generation parameters such as Maximum New Tokens, Temperature, Top-p, Top-k, and Repetition Penalty.
+* **Output Management:** Built-in actions allow users to instantly copy the raw output text to their clipboard or save the generated response directly as a `.txt` file.
+* **Flash Attention 2 Integration:** Utilizes `kernels-community/flash-attn2` for optimized, memory-efficient inference on compatible GPUs.
 
-## Features
+### **Repository Structure**
 
-### Core Capabilities
-- **Advanced OCR**: Extract text from images with high accuracy using multiple specialized models
-- **Document Analysis**: Convert documents to structured formats including markdown and tables
-- **Image Understanding**: Comprehensive scene analysis and visual reasoning
-- **Video Processing**: Temporal video analysis with frame-by-frame understanding
-- **Multi-Model Support**: Choose from five different vision-language models optimized for specific tasks
+```text
+├── examples/
+│   ├── 1.jpg
+│   ├── 2.jpg
+│   ├── 3.jpg
+│   ├── 4.jpg
+│   └── 5.jpg
+├── app.py
+├── LICENSE
+├── pre-requirements.txt
+├── README.md
+└── requirements.txt
+```
 
-### Supported Models
-1. **Nanonets-OCR-s**: State-of-the-art image-to-markdown OCR with intelligent content recognition
-2. **Qwen2-VL-OCR-2B**: Specialized for messy OCR, image-to-text conversion, and math problem solving
-3. **RolmOCR-7B**: High-quality document parsing for PDFs and complex layouts
-4. **olmOCR-7B-0725**: fine-tuned with olmocr-mix-0225 on top of Qwen2.5-VL-7B-Instruct
-5. **Aya-Vision-8B**: Multi-purpose vision-language model with advanced reasoning capabilities
+### **Installation and Requirements**
 
-## Installation
+To run Multimodal-OCR locally, you need to configure a Python environment with the following dependencies. Ensure you have a compatible CUDA-enabled GPU for optimal performance.
 
-### Prerequisites
-- Python 3.8+
-- CUDA-compatible GPU (recommended)
-- Git
-
-### Setup
+**1. Install Pre-requirements**
+Run the following command to update pip to the required version:
 ```bash
-# Clone the repository
-git clone https://github.com/PRITHIVSAKTHIUR/Multimodal-OCR.git
-cd Multimodal-OCR
-
-# Install dependencies
-pip install -r requirements.txt
+pip install pip>=23.0.0
 ```
 
-### Required Dependencies
-```
+**2. Install Core Requirements**
+Install the necessary machine learning and UI libraries. You can place these in a `requirements.txt` file and run `pip install -r requirements.txt`.
+
+```text
 git+https://github.com/huggingface/transformers.git@v4.57.6
 git+https://github.com/huggingface/accelerate.git
 git+https://github.com/huggingface/peft.git
@@ -61,152 +58,23 @@ kernels
 hf_xet
 spaces
 pillow
-gradio # - gradio@6.3.0
+gradio
 av
 ```
 
-## Usage
+---
 
-### Running the Application
+### **Usage**
+
+Once your environment is set up and the dependencies are installed, you can launch the application by running the main Python script:
+
 ```bash
 python app.py
 ```
 
-The application will launch a Gradio web interface accessible through your browser.
+After the script initializes the interface, it will provide a local web address (usually `http://127.0.0.1:7860/`) which you can open in your browser to interact with the models. Note that the selected models will be downloaded and loaded into VRAM upon their first invocation.
 
-### Interface Overview
+### **License and Source**
 
-#### Image Inference Tab
-- **Upload Images**: Support for various image formats (PNG, JPG, etc.)
-- **Query Input**: Natural language queries for specific tasks
-- **Model Selection**: Choose from five specialized models
-- **Real-time Processing**: Streaming responses with live output
-
-### Advanced Configuration Options
-- **Max New Tokens**: Control response length (1-2048)
-- **Temperature**: Adjust creativity and randomness (0.1-4.0)
-- **Top-p**: Nuclear sampling parameter (0.05-1.0)
-- **Top-k**: Token selection threshold (1-1000)
-- **Repetition Penalty**: Prevent repetitive outputs (1.0-2.0)
-
-## API Reference
-
-### Core Functions
-
-#### `generate_image(model_name, text, image, **kwargs)`
-Process image inputs with the selected model
-- **Parameters**: 
-  - `model_name`: Selected model identifier
-  - `text`: Query or instruction text
-  - `image`: PIL Image object
-  - `**kwargs`: Generation parameters (temperature, top_p, etc.)
-- **Returns**: Streaming tuple of (raw_output, markdown_output)
-
-### Utility Functions
-
-#### `downsample_video(video_path)`
-Extract representative frames from video files
-- **Parameters**: Path to video file
-- **Returns**: List of (PIL_image, timestamp) tuples
-- **Frame Sampling**: Extracts 10 evenly spaced frames
-
-## Examples
-
-### Document OCR
-```python
-# Query: "Convert this page to doc [table] precisely for markdown"
-# Input: Document image with tables
-# Output: Structured markdown with proper table formatting
-```
-
-### Scene Analysis
-```python
-# Query: "Explain the scene"
-# Input: Complex image
-# Output: Detailed scene description with context
-```
-
-### Mathematical Content
-```python
-# Query: "Extract the mathematical equations"
-# Input: Image with equations
-# Output: LaTeX formatted mathematical expressions
-```
-
-## Performance Optimization
-
-### GPU Acceleration
-- CUDA support for all models
-- Automatic device detection
-- Memory-efficient model loading
-
-### Streaming Responses
-- Real-time output generation
-- Progressive result display
-- Reduced perceived latency
-
-## Configuration
-
-### Environment Variables
-```bash
-MAX_INPUT_TOKEN_LENGTH=4096  # Maximum input token length
-```
-
-### Model Parameters
-- **Default Max Tokens**: 1024
-- **Default Temperature**: 0.6
-- **Default Top-p**: 0.9
-- **Default Top-k**: 50
-- **Default Repetition Penalty**: 1.2
-
-## Limitations
-
-- GPU memory requirements scale with model complexity
-- Processing time depends on input size and hardware capabilities
-- Some models may not perform optimally on video content
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## Development
-
-### Local Development
-```bash
-# Install in development mode
-pip install -e .
-
-# Run with debugging
-python app.py --debug
-```
-
-### Testing
-```bash
-# Run basic functionality tests
-python -m pytest tests/
-
-# Test individual models
-python test_models.py
-```
-
-## License
-
-This project is licensed under the MIT License. See the LICENSE file for details.
-
-## Acknowledgments
-
-- Built on Hugging Face Transformers ecosystem
-- Powered by Gradio for interactive web interface
-- Utilizes multiple state-of-the-art vision-language models
-- Integrated with Spaces GPU acceleration platform
-
-## Support and Issues
-
-For questions, issues, or feature requests:
-- Open an issue on GitHub
-- Check the model documentation on Hugging Face
-- Join the discussion in the Hugging Face Space
+* **License:** Apache License - Version 2.0
+* **GitHub Repository:** [https://github.com/PRITHIVSAKTHIUR/Multimodal-OCR.git](https://github.com/PRITHIVSAKTHIUR/Multimodal-OCR.git)
