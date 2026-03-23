@@ -101,6 +101,12 @@ image_examples = [
 ]
 
 
+def select_model(model_name: str):
+    if model_name not in MODEL_MAP:
+        raise ValueError("Invalid model selected.")
+    return MODEL_MAP[model_name]
+
+
 def pil_to_data_url(img: Image.Image, fmt="PNG"):
     buf = BytesIO()
     img.save(buf, format=fmt)
@@ -158,25 +164,45 @@ EXAMPLE_CARDS_HTML = build_example_cards_html()
 
 def load_example_data(idx_str):
     try:
-        idx = int(float(idx_str))
+        idx = int(str(idx_str).strip())
     except Exception:
-        return json.dumps({"status": "error", "message": "Invalid example index"})
+        return gr.update(value=json.dumps({"status": "error", "message": "Invalid example index"}))
+
     if idx < 0 or idx >= len(image_examples):
-        return json.dumps({"status": "error", "message": "Example index out of range"})
+        return gr.update(value=json.dumps({"status": "error", "message": "Example index out of range"}))
+
     ex = image_examples[idx]
     img_b64 = file_to_data_url(ex["image"])
     if not img_b64:
-        return json.dumps({"status": "error", "message": "Could not load example image"})
-    return json.dumps({
+        return gr.update(value=json.dumps({"status": "error", "message": "Could not load example image"}))
+
+    return gr.update(value=json.dumps({
         "status": "ok",
         "query": ex["query"],
         "image": img_b64,
         "model": ex["model"],
         "name": os.path.basename(ex["image"]),
-    })
+    }))
 
 
-def calc_timeout_duration(model_name, text, image, max_new_tokens, temperature, top_p, top_k, repetition_penalty, gpu_timeout):
+def b64_to_pil(b64_str):
+    if not b64_str:
+        return None
+    try:
+        if b64_str.startswith("data:"):
+            _, data = b64_str.split(",", 1)
+        else:
+            data = b64_str
+        image_data = base64.b64decode(data)
+        return Image.open(BytesIO(image_data)).convert("RGB")
+    except Exception:
+        return None
+
+
+def calc_timeout_duration(*args, **kwargs):
+    gpu_timeout = kwargs.get("gpu_timeout", None)
+    if gpu_timeout is None and args:
+        gpu_timeout = args[-1]
     try:
         return int(gpu_timeout)
     except Exception:
@@ -185,58 +211,120 @@ def calc_timeout_duration(model_name, text, image, max_new_tokens, temperature, 
 
 @spaces.GPU(duration=calc_timeout_duration)
 def generate_image(model_name, text, image, max_new_tokens, temperature, top_p, top_k, repetition_penalty, gpu_timeout):
-    if not model_name or model_name not in MODEL_MAP:
-        raise gr.Error("Please select a valid model.")
-    if image is None:
-        raise gr.Error("Please upload an image.")
-    if not text or not str(text).strip():
-        raise gr.Error("Please enter your OCR/query instruction.")
-    if len(str(text)) > MAX_INPUT_TOKEN_LENGTH * 8:
-        raise gr.Error("Query is too long. Please shorten your input.")
+    try:
+        if not model_name or model_name not in MODEL_MAP:
+            yield "[ERROR] Please select a valid model."
+            return
+        if image is None:
+            yield "[ERROR] Please upload an image."
+            return
+        if not text or not str(text).strip():
+            yield "[ERROR] Please enter your OCR/query instruction."
+            return
+        if len(str(text)) > MAX_INPUT_TOKEN_LENGTH * 8:
+            yield "[ERROR] Query is too long. Please shorten your input."
+            return
 
-    processor, model = MODEL_MAP[model_name]
+        processor, model = select_model(model_name)
 
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "image"},
-            {"type": "text", "text": text},
-        ]
-    }]
-    prompt_full = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": text},
+            ]
+        }]
 
-    inputs = processor(
-        text=[prompt_full],
-        images=[image],
-        return_tensors="pt",
-        padding=True
-    ).to(device)
+        prompt_full = processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
 
-    streamer = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True)
-    generation_kwargs = {
-        **inputs,
-        "streamer": streamer,
-        "max_new_tokens": int(max_new_tokens),
-        "do_sample": True,
-        "temperature": float(temperature),
-        "top_p": float(top_p),
-        "top_k": int(top_k),
-        "repetition_penalty": float(repetition_penalty),
-    }
+        inputs = processor(
+            text=[prompt_full],
+            images=[image],
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=MAX_INPUT_TOKEN_LENGTH
+        ).to(device)
 
-    thread = Thread(target=model.generate, kwargs=generation_kwargs)
-    thread.start()
+        streamer = TextIteratorStreamer(
+            processor.tokenizer if hasattr(processor, "tokenizer") else processor,
+            skip_prompt=True,
+            skip_special_tokens=True
+        )
 
-    buffer = ""
-    for new_text in streamer:
-        buffer += new_text
-        buffer = buffer.replace("<|im_end|>", "")
-        time.sleep(0.01)
-        yield buffer
+        generation_error = {"error": None}
 
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        generation_kwargs = {
+            **inputs,
+            "streamer": streamer,
+            "max_new_tokens": int(max_new_tokens),
+            "do_sample": True,
+            "temperature": float(temperature),
+            "top_p": float(top_p),
+            "top_k": int(top_k),
+            "repetition_penalty": float(repetition_penalty),
+        }
+
+        def _run_generation():
+            try:
+                model.generate(**generation_kwargs)
+            except Exception as e:
+                generation_error["error"] = e
+                try:
+                    streamer.end()
+                except Exception:
+                    pass
+
+        thread = Thread(target=_run_generation, daemon=True)
+        thread.start()
+
+        buffer = ""
+        for new_text in streamer:
+            buffer += new_text.replace("<|im_end|>", "")
+            time.sleep(0.01)
+            yield buffer
+
+        thread.join(timeout=1.0)
+
+        if generation_error["error"] is not None:
+            err_msg = f"[ERROR] Inference failed: {str(generation_error['error'])}"
+            if buffer.strip():
+                yield buffer + "\n\n" + err_msg
+            else:
+                yield err_msg
+            return
+
+        if not buffer.strip():
+            yield "[ERROR] No output was generated."
+
+    except Exception as e:
+        yield f"[ERROR] {str(e)}"
+    finally:
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+def run_ocr(model_name, text, image_b64, max_new_tokens_v, temperature_v, top_p_v, top_k_v, repetition_penalty_v, gpu_timeout_v):
+    try:
+        image = b64_to_pil(image_b64)
+        yield from generate_image(
+            model_name=model_name,
+            text=text,
+            image=image,
+            max_new_tokens=max_new_tokens_v,
+            temperature=temperature_v,
+            top_p=top_p_v,
+            top_k=top_k_v,
+            repetition_penalty=repetition_penalty_v,
+            gpu_timeout=gpu_timeout_v,
+        )
+    except Exception as e:
+        yield f"[ERROR] {str(e)}"
 
 
 def noop():
@@ -578,7 +666,6 @@ function init() {
     const runBtnEl = document.getElementById('custom-run-btn');
     const outputArea = document.getElementById('custom-output-textarea');
     const imgStatus = document.getElementById('sb-image-status');
-    const exampleResultContainer = document.getElementById('example-result-data');
 
     if (!dropZone || !fileInput || !promptInput || !previewWrap || !previewImg) {
         setTimeout(init, 250);
@@ -588,6 +675,8 @@ function init() {
     window.__ocr2GreenInitDone = true;
     let imageState = null;
     let toastTimer = null;
+    let examplePoller = null;
+    let lastSeenExamplePayload = null;
 
     function showToast(message, type) {
         let toast = document.getElementById('app-toast');
@@ -610,7 +699,6 @@ function init() {
         toast.classList.add('visible');
         toastTimer = setTimeout(() => toast.classList.remove('visible'), 3500);
     }
-    window.__showToast = showToast;
 
     function showLoader() {
         const l = document.getElementById('output-loader');
@@ -624,8 +712,17 @@ function init() {
         const sb = document.getElementById('sb-run-state');
         if (sb) sb.textContent = 'Done';
     }
+    function setRunErrorState() {
+        const l = document.getElementById('output-loader');
+        if (l) l.classList.remove('active');
+        const sb = document.getElementById('sb-run-state');
+        if (sb) sb.textContent = 'Error';
+    }
+
+    window.__showToast = showToast;
     window.__showLoader = showLoader;
     window.__hideLoader = hideLoader;
+    window.__setRunErrorState = setRunErrorState;
 
     function flashPromptError() {
         promptInput.classList.add('error-flash');
@@ -639,19 +736,27 @@ function init() {
         setTimeout(() => outputArea.classList.remove('error-flash'), 800);
     }
 
+    function getValueFromContainer(containerId) {
+        const container = document.getElementById(containerId);
+        if (!container) return '';
+        const el = container.querySelector('textarea, input');
+        return el ? (el.value || '') : '';
+    }
+
     function setGradioValue(containerId, value) {
         const container = document.getElementById(containerId);
-        if (!container) return;
-        container.querySelectorAll('input, textarea').forEach(el => {
-            if (el.type === 'file' || el.type === 'range' || el.type === 'checkbox') return;
-            const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-            const ns = Object.getOwnPropertyDescriptor(proto, 'value');
-            if (ns && ns.set) {
-                ns.set.call(el, value);
-                el.dispatchEvent(new Event('input', {bubbles:true, composed:true}));
-                el.dispatchEvent(new Event('change', {bubbles:true, composed:true}));
-            }
-        });
+        if (!container) return false;
+        const el = container.querySelector('textarea, input');
+        if (!el) return false;
+        const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const ns = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (ns && ns.set) {
+            ns.set.call(el, value);
+            el.dispatchEvent(new Event('input', {bubbles:true, composed:true}));
+            el.dispatchEvent(new Event('change', {bubbles:true, composed:true}));
+            return true;
+        }
+        return false;
     }
 
     function syncImageToGradio() {
@@ -800,7 +905,12 @@ function init() {
         showLoader();
         setTimeout(() => {
             const gradioBtn = document.getElementById('gradio-run-btn');
-            if (!gradioBtn) return;
+            if (!gradioBtn) {
+                setRunErrorState();
+                if (outputArea) outputArea.value = '[ERROR] Run button not found.';
+                showToast('Run button not found', 'error');
+                return;
+            }
             const btn = gradioBtn.querySelector('button');
             if (btn) btn.click(); else gradioBtn.click();
         }, 180);
@@ -849,34 +959,10 @@ function init() {
         });
     }
 
-    document.querySelectorAll('.example-card[data-idx]').forEach(card => {
-        card.addEventListener('click', () => {
-            const idx = card.getAttribute('data-idx');
-            document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
-            card.classList.add('loading');
-            showToast('Loading example...', 'info');
-            setGradioValue('example-result-data', '');
-            setGradioValue('example-idx-input', idx);
-            setTimeout(() => {
-                const btn = document.getElementById('example-load-btn');
-                if (btn) {
-                    const b = btn.querySelector('button');
-                    if (b) b.click(); else btn.click();
-                }
-            }, 150);
-            setTimeout(() => card.classList.remove('loading'), 12000);
-        });
-    });
-
-    function checkExampleResult() {
-        if (!exampleResultContainer) return;
-        const el = exampleResultContainer.querySelector('textarea') || exampleResultContainer.querySelector('input');
-        if (!el || !el.value) return;
-        if (window.__lastExampleVal2 === el.value) return;
+    function applyExamplePayload(raw) {
         try {
-            const data = JSON.parse(el.value);
+            const data = JSON.parse(raw);
             if (data.status === 'ok') {
-                window.__lastExampleVal2 = el.value;
                 if (data.image) setPreview(data.image, data.name || 'example.jpg');
                 if (data.query) {
                     promptInput.value = data.query;
@@ -889,14 +975,88 @@ function init() {
                 document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
                 showToast(data.message || 'Failed to load example', 'error');
             }
-        } catch(e) {}
+        } catch (e) {
+            document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
+        }
     }
 
-    const obsExample = new MutationObserver(checkExampleResult);
-    if (exampleResultContainer) {
-        obsExample.observe(exampleResultContainer, {childList:true, subtree:true, characterData:true, attributes:true});
+    function startExamplePolling() {
+        if (examplePoller) clearInterval(examplePoller);
+        let attempts = 0;
+        examplePoller = setInterval(() => {
+            attempts += 1;
+            const current = getValueFromContainer('example-result-data');
+            if (current && current !== lastSeenExamplePayload) {
+                lastSeenExamplePayload = current;
+                clearInterval(examplePoller);
+                examplePoller = null;
+                applyExamplePayload(current);
+                return;
+            }
+            if (attempts >= 100) {
+                clearInterval(examplePoller);
+                examplePoller = null;
+                document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
+                showToast('Example load timed out', 'error');
+            }
+        }, 120);
     }
-    setInterval(checkExampleResult, 500);
+
+    function triggerExampleLoad(idx) {
+        const btnWrap = document.getElementById('example-load-btn');
+        const btn = btnWrap ? (btnWrap.querySelector('button') || btnWrap) : null;
+        if (!btn) return;
+
+        let attempts = 0;
+
+        function writeIdxAndClick() {
+            attempts += 1;
+            const ok1 = setGradioValue('example-idx-input', String(idx));
+            setGradioValue('example-result-data', '');
+            const currentVal = getValueFromContainer('example-idx-input');
+
+            if (ok1 && currentVal === String(idx)) {
+                btn.click();
+                startExamplePolling();
+                return;
+            }
+
+            if (attempts < 30) {
+                setTimeout(writeIdxAndClick, 100);
+            } else {
+                document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
+                showToast('Failed to initialize example loader', 'error');
+            }
+        }
+
+        writeIdxAndClick();
+    }
+
+    document.querySelectorAll('.example-card[data-idx]').forEach(card => {
+        card.addEventListener('click', () => {
+            const idx = card.getAttribute('data-idx');
+            if (idx === null || idx === undefined || idx === '') return;
+            document.querySelectorAll('.example-card.loading').forEach(c => c.classList.remove('loading'));
+            card.classList.add('loading');
+            showToast('Loading example...', 'info');
+            triggerExampleLoad(idx);
+        });
+    });
+
+    const observerTarget = document.getElementById('example-result-data');
+    if (observerTarget) {
+        const obs = new MutationObserver(() => {
+            const current = getValueFromContainer('example-result-data');
+            if (!current || current === lastSeenExamplePayload) return;
+            lastSeenExamplePayload = current;
+            if (examplePoller) {
+                clearInterval(examplePoller);
+                examplePoller = null;
+            }
+            applyExamplePayload(current);
+        });
+        obs.observe(observerTarget, {childList:true, subtree:true, characterData:true, attributes:true});
+    }
 
     if (outputArea) outputArea.value = '';
     const sb = document.getElementById('sb-run-state');
@@ -916,6 +1076,10 @@ function watchOutputs() {
 
     let lastText = '';
 
+    function isErrorText(val) {
+        return typeof val === 'string' && val.trim().startsWith('[ERROR]');
+    }
+
     function syncOutput() {
         const el = resultContainer.querySelector('textarea') || resultContainer.querySelector('input');
         if (!el) return;
@@ -924,7 +1088,15 @@ function watchOutputs() {
             lastText = val;
             outArea.value = val;
             outArea.scrollTop = outArea.scrollHeight;
-            if (window.__hideLoader && val.trim()) window.__hideLoader();
+
+            if (val.trim()) {
+                if (isErrorText(val)) {
+                    if (window.__setRunErrorState) window.__setRunErrorState();
+                    if (window.__showToast) window.__showToast('Inference failed', 'error');
+                } else {
+                    if (window.__hideLoader) window.__hideLoader();
+                }
+            }
         }
     }
 
@@ -1118,33 +1290,6 @@ with gr.Blocks() as demo:
     """)
 
     run_btn = gr.Button("Run", elem_id="gradio-run-btn")
-
-    def b64_to_pil(b64_str):
-        if not b64_str:
-            return None
-        try:
-            if b64_str.startswith("data:image"):
-                _, data = b64_str.split(",", 1)
-            else:
-                data = b64_str
-            image_data = base64.b64decode(data)
-            return Image.open(BytesIO(image_data)).convert("RGB")
-        except Exception:
-            return None
-
-    def run_ocr(model_name, text, image_b64, max_new_tokens_v, temperature_v, top_p_v, top_k_v, repetition_penalty_v, gpu_timeout_v):
-        image = b64_to_pil(image_b64)
-        yield from generate_image(
-            model_name=model_name,
-            text=text,
-            image=image,
-            max_new_tokens=max_new_tokens_v,
-            temperature=temperature_v,
-            top_p=top_p_v,
-            top_k=top_k_v,
-            repetition_penalty=repetition_penalty_v,
-            gpu_timeout=gpu_timeout_v,
-        )
 
     demo.load(fn=noop, inputs=None, outputs=None, js=gallery_js)
     demo.load(fn=noop, inputs=None, outputs=None, js=wire_outputs_js)
