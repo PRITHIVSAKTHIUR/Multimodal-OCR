@@ -3,8 +3,10 @@ import gc
 import json
 import base64
 import time
+import requests
+from collections import OrderedDict
 from io import BytesIO
-from threading import Thread
+from threading import Lock, Thread
 
 import gradio as gr
 import spaces
@@ -23,6 +25,17 @@ from transformers import (
 MAX_MAX_NEW_TOKENS = 4096
 DEFAULT_MAX_NEW_TOKENS = 1024
 MAX_INPUT_TOKEN_LENGTH = int(os.getenv("MAX_INPUT_TOKEN_LENGTH", "4096"))
+DEEPSEEK_OCR_BASE_URL = os.getenv("DEEPSEEK_OCR_BASE_URL", "").rstrip("/")
+DEEPSEEK_OCR_API_KEY = os.getenv("DEEPSEEK_OCR_API_KEY", "EMPTY")
+DEEPSEEK_OCR_MODEL_ID = os.getenv("DEEPSEEK_OCR_MODEL_ID", "deepseek-ai/DeepSeek-OCR")
+DEEPSEEK_OCR_TIMEOUT = int(os.getenv("DEEPSEEK_OCR_TIMEOUT", "3600"))
+DEEPSEEK_OCR_REMOTE_NAME = "DeepSeek-OCR"
+DEEPSEEK_OCR_CONFIGURED = bool(DEEPSEEK_OCR_BASE_URL)
+DEFAULT_ATTN_IMPLEMENTATION = "kernels-community/flash-attn2"
+try:
+    LOCAL_MODEL_CACHE_SIZE = max(1, int(os.getenv("LOCAL_MODEL_CACHE_SIZE", "1")))
+except ValueError:
+    LOCAL_MODEL_CACHE_SIZE = 1
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -34,77 +47,277 @@ print("cuda device count:", torch.cuda.device_count())
 if torch.cuda.is_available():
     print("current device:", torch.cuda.current_device())
     print("device name:", torch.cuda.get_device_name(torch.cuda.current_device()))
+else:
+    print("WARNING: No CUDA device detected. Local models will run on CPU in float32, "
+          "which may be extremely slow or fail for large vision-language models. "
+          "A CUDA-capable GPU is strongly recommended.")
 print("Using device:", device)
 
-
-MODEL_ID_V = "nanonets/Nanonets-OCR2-3B"
-processor_v = AutoProcessor.from_pretrained(MODEL_ID_V, trust_remote_code=True)
-model_v = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-    MODEL_ID_V,
-    attn_implementation="kernels-community/flash-attn2",
-    trust_remote_code=True,
-    torch_dtype=torch.float16
-).to(device).eval()
-
-MODEL_ID_X = "prithivMLmods/Qwen2-VL-OCR-2B-Instruct"
-processor_x = AutoProcessor.from_pretrained(MODEL_ID_X, trust_remote_code=True)
-model_x = Qwen2VLForConditionalGeneration.from_pretrained(
-    MODEL_ID_X,
-    attn_implementation="kernels-community/flash-attn2",
-    trust_remote_code=True,
-    torch_dtype=torch.float16
-).to(device).eval()
-
-MODEL_ID_A = "CohereForAI/aya-vision-8b"
-processor_a = AutoProcessor.from_pretrained(MODEL_ID_A, trust_remote_code=True)
-model_a = AutoModelForImageTextToText.from_pretrained(
-    MODEL_ID_A,
-    attn_implementation="kernels-community/flash-attn2",
-    trust_remote_code=True,
-    torch_dtype=torch.float16
-).to(device).eval()
-
-MODEL_ID_W = "allenai/olmOCR-7B-0725"
-processor_w = AutoProcessor.from_pretrained(MODEL_ID_W, trust_remote_code=True)
-model_w = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-    MODEL_ID_W,
-    attn_implementation="kernels-community/flash-attn2",
-    trust_remote_code=True,
-    torch_dtype=torch.float16
-).to(device).eval()
-
-MODEL_ID_M = "reducto/RolmOCR"
-processor_m = AutoProcessor.from_pretrained(MODEL_ID_M, trust_remote_code=True)
-model_m = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-    MODEL_ID_M,
-    attn_implementation="kernels-community/flash-attn2",
-    trust_remote_code=True,
-    torch_dtype=torch.float16
-).to(device).eval()
-
-MODEL_MAP = {
-    "Nanonets-OCR2-3B": (processor_v, model_v),
-    "olmOCR-7B-0725": (processor_w, model_w),
-    "RolmOCR-7B": (processor_m, model_m),
-    "Aya-Vision-8B": (processor_a, model_a),
-    "Qwen2-VL-OCR-2B": (processor_x, model_x),
+_COMMON_PROCESSOR_KWARGS = {"trust_remote_code": True}
+_COMMON_MODEL_KWARGS = {
+    "attn_implementation": DEFAULT_ATTN_IMPLEMENTATION,
+    "trust_remote_code": True,
+    "torch_dtype": torch.float16,
 }
 
-MODEL_CHOICES = list(MODEL_MAP.keys())
+LOCAL_MODEL_SPECS = {
+    "Nanonets-OCR2-3B": {
+        "model_id": "nanonets/Nanonets-OCR2-3B",
+        "model_class": Qwen2_5_VLForConditionalGeneration,
+        "processor_kwargs": {**_COMMON_PROCESSOR_KWARGS},
+        "model_kwargs": {**_COMMON_MODEL_KWARGS},
+    },
+    "GLM-OCR": {
+        "model_id": "zai-org/GLM-OCR",
+        "model_class": AutoModelForImageTextToText,
+        "processor_kwargs": {},
+        "model_kwargs": {
+            "attn_implementation": DEFAULT_ATTN_IMPLEMENTATION,
+            "torch_dtype": "auto",
+        },
+    },
+    "olmOCR-7B-0725": {
+        "model_id": "allenai/olmOCR-7B-0725",
+        "model_class": Qwen2_5_VLForConditionalGeneration,
+        "processor_kwargs": {**_COMMON_PROCESSOR_KWARGS},
+        "model_kwargs": {**_COMMON_MODEL_KWARGS},
+    },
+    "RolmOCR-7B": {
+        "model_id": "reducto/RolmOCR",
+        "model_class": Qwen2_5_VLForConditionalGeneration,
+        "processor_kwargs": {**_COMMON_PROCESSOR_KWARGS},
+        "model_kwargs": {**_COMMON_MODEL_KWARGS},
+    },
+    "Aya-Vision-8B": {
+        "model_id": "CohereForAI/aya-vision-8b",
+        "model_class": AutoModelForImageTextToText,
+        "processor_kwargs": {**_COMMON_PROCESSOR_KWARGS},
+        "model_kwargs": {**_COMMON_MODEL_KWARGS},
+    },
+    "Qwen2-VL-OCR-2B": {
+        "model_id": "prithivMLmods/Qwen2-VL-OCR-2B-Instruct",
+        "model_class": Qwen2VLForConditionalGeneration,
+        "processor_kwargs": {**_COMMON_PROCESSOR_KWARGS},
+        "model_kwargs": {**_COMMON_MODEL_KWARGS},
+    },
+}
+
+MODEL_UI_CONFIGS = {
+    "Nanonets-OCR2-3B": {
+        "available": True,
+        "defaultPrompt": "",
+        "defaultSettings": {
+            "maxNewTokens": DEFAULT_MAX_NEW_TOKENS,
+            "temperature": 0.7,
+            "topP": 0.9,
+            "topK": 50,
+            "repetitionPenalty": 1.1,
+        },
+        "hint": "local",
+        "unavailableMessage": "",
+    },
+    "GLM-OCR": {
+        "available": True,
+        "defaultPrompt": "Text Recognition:",
+        "defaultSettings": {
+            "maxNewTokens": 2048,
+            "temperature": 0.0,
+            "topP": 1.0,
+            "topK": 50,
+            "repetitionPenalty": 1.0,
+        },
+        "hint": "ocr",
+        "unavailableMessage": "",
+    },
+    "olmOCR-7B-0725": {
+        "available": True,
+        "defaultPrompt": "",
+        "defaultSettings": {
+            "maxNewTokens": DEFAULT_MAX_NEW_TOKENS,
+            "temperature": 0.7,
+            "topP": 0.9,
+            "topK": 50,
+            "repetitionPenalty": 1.1,
+        },
+        "hint": "local",
+        "unavailableMessage": "",
+    },
+    "RolmOCR-7B": {
+        "available": True,
+        "defaultPrompt": "",
+        "defaultSettings": {
+            "maxNewTokens": DEFAULT_MAX_NEW_TOKENS,
+            "temperature": 0.7,
+            "topP": 0.9,
+            "topK": 50,
+            "repetitionPenalty": 1.1,
+        },
+        "hint": "local",
+        "unavailableMessage": "",
+    },
+    "Aya-Vision-8B": {
+        "available": True,
+        "defaultPrompt": "",
+        "defaultSettings": {
+            "maxNewTokens": DEFAULT_MAX_NEW_TOKENS,
+            "temperature": 0.7,
+            "topP": 0.9,
+            "topK": 50,
+            "repetitionPenalty": 1.1,
+        },
+        "hint": "local",
+        "unavailableMessage": "",
+    },
+    "Qwen2-VL-OCR-2B": {
+        "available": True,
+        "defaultPrompt": "",
+        "defaultSettings": {
+            "maxNewTokens": DEFAULT_MAX_NEW_TOKENS,
+            "temperature": 0.7,
+            "topP": 0.9,
+            "topK": 50,
+            "repetitionPenalty": 1.1,
+        },
+        "hint": "local",
+        "unavailableMessage": "",
+    },
+    DEEPSEEK_OCR_REMOTE_NAME: {
+        "available": DEEPSEEK_OCR_CONFIGURED,
+        "defaultPrompt": "Convert the document to markdown.",
+        "defaultSettings": {
+            "maxNewTokens": 2048,
+            "temperature": 0.0,
+            "topP": 1.0,
+            "topK": 50,
+            "repetitionPenalty": 1.0,
+        },
+        "hint": "remote",
+        "unavailableMessage": "Set DEEPSEEK_OCR_BASE_URL to enable DeepSeek-OCR.",
+    },
+}
+
+MODEL_CHOICES = list(LOCAL_MODEL_SPECS.keys()) + [DEEPSEEK_OCR_REMOTE_NAME]
+MODEL_UI_CONFIGS_JSON = json.dumps(MODEL_UI_CONFIGS)
+DEEPSEEK_STATUS_TEXT = "DeepSeek endpoint configured" if DEEPSEEK_OCR_CONFIGURED else "DeepSeek endpoint not configured"
+DEEPSEEK_STATUS_CLASS = "sb-ok" if DEEPSEEK_OCR_CONFIGURED else "sb-warning"
+LOCAL_MODEL_LOCK = Lock()
+LOCAL_MODEL_CACHE = OrderedDict()
 
 image_examples = [
     {"query": "Perform OCR on the image precisely.", "image": "examples/5.jpg", "model": "Nanonets-OCR2-3B"},
+    {"query": "Text Recognition:", "image": "examples/5.jpg", "model": "GLM-OCR"},
     {"query": "Run OCR on the image and ensure high accuracy.", "image": "examples/4.jpg", "model": "olmOCR-7B-0725"},
     {"query": "Conduct OCR on the image with exact text recognition.", "image": "examples/2.jpg", "model": "RolmOCR-7B"},
     {"query": "Perform precise OCR extraction on the image.", "image": "examples/1.jpg", "model": "Qwen2-VL-OCR-2B"},
     {"query": "Describe the visual content and extract visible text from the image.", "image": "examples/3.jpg", "model": "Aya-Vision-8B"},
+    {"query": "Convert the document to markdown.", "image": "examples/4.jpg", "model": DEEPSEEK_OCR_REMOTE_NAME},
 ]
 
 
 def select_model(model_name: str):
-    if model_name not in MODEL_MAP:
+    if model_name not in LOCAL_MODEL_SPECS:
         raise ValueError("Invalid model selected.")
-    return MODEL_MAP[model_name]
+    return load_local_model(model_name)
+
+
+def build_model_tabs_html():
+    cards = []
+    for model_name in MODEL_CHOICES:
+        config = MODEL_UI_CONFIGS[model_name]
+        is_active = model_name == "Nanonets-OCR2-3B"
+        classes = ["model-tab"]
+        if is_active:
+            classes.append("active")
+        if not config["available"]:
+            classes.append("disabled")
+
+        title = config["unavailableMessage"] or model_name
+        cards.append(
+            f'<button class="{" ".join(classes)}" data-model="{model_name}" '
+            f'data-available="{str(config["available"]).lower()}" title="{title}">'
+            f'<span class="model-tab-label">{model_name}</span>'
+            f'<span class="model-tab-hint">{config["hint"]}</span>'
+            f'</button>'
+        )
+    return "".join(cards)
+
+
+def get_local_model_load_kwargs(spec):
+    kwargs = dict(spec["model_kwargs"])
+    if not torch.cuda.is_available():
+        kwargs.pop("attn_implementation", None)
+        if kwargs.get("torch_dtype") is torch.float16:
+            kwargs["torch_dtype"] = torch.float32
+    return kwargs
+
+
+def unload_local_model():
+    while LOCAL_MODEL_CACHE:
+        _, cached = LOCAL_MODEL_CACHE.popitem(last=False)
+        del cached
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def is_local_model_cached(model_name: str):
+    return model_name in LOCAL_MODEL_CACHE
+
+
+def evict_oldest_local_model():
+    if not LOCAL_MODEL_CACHE:
+        return None
+
+    evicted_name, cached = LOCAL_MODEL_CACHE.popitem(last=False)
+    del cached
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return evicted_name
+
+
+def load_local_model(model_name: str):
+    if model_name in LOCAL_MODEL_CACHE:
+        cached = LOCAL_MODEL_CACHE.pop(model_name)
+        LOCAL_MODEL_CACHE[model_name] = cached
+        processor, model = cached
+        return processor, model, {"cache_hit": True, "evicted": []}
+
+    evicted_models = []
+    while len(LOCAL_MODEL_CACHE) >= LOCAL_MODEL_CACHE_SIZE:
+        evicted_name = evict_oldest_local_model()
+        if evicted_name is None:
+            break
+        evicted_models.append(evicted_name)
+
+    spec = LOCAL_MODEL_SPECS[model_name]
+    print(f"Loading model: {model_name}")
+
+    processor = None
+    model = None
+    try:
+        processor = AutoProcessor.from_pretrained(
+            spec["model_id"],
+            **spec["processor_kwargs"],
+        )
+        model = spec["model_class"].from_pretrained(
+            spec["model_id"],
+            **get_local_model_load_kwargs(spec),
+        ).to(device).eval()
+    except Exception:
+        del processor
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise
+
+    LOCAL_MODEL_CACHE[model_name] = (processor, model)
+    return processor, model, {"cache_hit": False, "evicted": evicted_models}
+
+
+def build_run_status(text, state="running"):
+    return json.dumps({"text": text, "state": state})
 
 
 def pil_to_data_url(img: Image.Image, fmt="PNG"):
@@ -200,109 +413,208 @@ def b64_to_pil(b64_str):
 
 
 def calc_timeout_duration(*args, **kwargs):
+    model_name = kwargs.get("model_name", None)
     gpu_timeout = kwargs.get("gpu_timeout", None)
+    if model_name is None and args:
+        model_name = args[0]
     if gpu_timeout is None and args:
         gpu_timeout = args[-1]
     try:
-        return int(gpu_timeout)
+        duration = int(gpu_timeout)
     except Exception:
-        return 60
+        duration = 60
+
+    if model_name in LOCAL_MODEL_SPECS and not is_local_model_cached(model_name):
+        return max(duration, 180)
+    return duration
+
+
+def build_messages(model_name, text):
+    prompt_text = str(text).strip() or MODEL_UI_CONFIGS.get(model_name, {}).get("defaultPrompt", "")
+
+    return [{
+        "role": "user",
+        "content": [
+            {"type": "image"},
+            {"type": "text", "text": prompt_text},
+        ]
+    }]
+
+
+def build_model_inputs(model_name, processor, image, text):
+    messages = build_messages(model_name, text)
+
+    prompt_full = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+
+    inputs = processor(
+        text=[prompt_full],
+        images=[image],
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=MAX_INPUT_TOKEN_LENGTH
+    )
+    inputs.pop("token_type_ids", None)
+    return inputs.to(device)
+
+
+def run_deepseek_remote(text, image_b64, max_new_tokens, temperature):
+    if not DEEPSEEK_OCR_BASE_URL:
+        yield "[ERROR] DeepSeek-OCR requires an OpenAI-compatible endpoint. Set DEEPSEEK_OCR_BASE_URL after starting the official vLLM server for deepseek-ai/DeepSeek-OCR.", build_run_status("DeepSeek-OCR endpoint is not configured.", "error")
+        return
+
+    prompt_text = str(text).strip() or MODEL_UI_CONFIGS[DEEPSEEK_OCR_REMOTE_NAME]["defaultPrompt"]
+    headers = {"Content-Type": "application/json"}
+    if DEEPSEEK_OCR_API_KEY:
+        headers["Authorization"] = f"Bearer {DEEPSEEK_OCR_API_KEY}"
+
+    yield "", build_run_status("Calling DeepSeek-OCR endpoint...", "running")
+
+    payload = {
+        "model": DEEPSEEK_OCR_MODEL_ID,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_b64}},
+                {"type": "text", "text": prompt_text},
+            ],
+        }],
+        "max_tokens": int(max_new_tokens),
+        "temperature": float(temperature),
+        "extra_body": {
+            "skip_special_tokens": False,
+            "vllm_xargs": {
+                "ngram_size": 30,
+                "window_size": 90,
+                "whitelist_token_ids": [128821, 128822],
+            },
+        },
+    }
+
+    try:
+        response = requests.post(
+            f"{DEEPSEEK_OCR_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=DEEPSEEK_OCR_TIMEOUT,
+        )
+        response.raise_for_status()
+        body = response.json()
+        content = body["choices"][0]["message"]["content"]
+        if isinstance(content, list):
+            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+
+        if not str(content).strip():
+            yield "[ERROR] DeepSeek-OCR returned no output.", build_run_status("DeepSeek-OCR returned no output.", "error")
+            return
+
+        yield str(content), build_run_status("Finished with DeepSeek-OCR.", "done")
+    except requests.RequestException as e:
+        yield f"[ERROR] DeepSeek-OCR request failed: {str(e)}", build_run_status("DeepSeek-OCR request failed.", "error")
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        yield f"[ERROR] DeepSeek-OCR response parsing failed: {str(e)}", build_run_status("DeepSeek-OCR response parsing failed.", "error")
 
 
 @spaces.GPU(duration=calc_timeout_duration)
 def generate_image(model_name, text, image, max_new_tokens, temperature, top_p, top_k, repetition_penalty, gpu_timeout):
     try:
-        if not model_name or model_name not in MODEL_MAP:
-            yield "[ERROR] Please select a valid model."
+        if not model_name or model_name not in LOCAL_MODEL_SPECS:
+            yield "[ERROR] Please select a valid model.", build_run_status("Please select a valid model.", "error")
             return
         if image is None:
-            yield "[ERROR] Please upload an image."
+            yield "[ERROR] Please upload an image.", build_run_status("Please upload an image.", "error")
             return
         if not text or not str(text).strip():
-            yield "[ERROR] Please enter your OCR/query instruction."
+            yield "[ERROR] Please enter your OCR/query instruction.", build_run_status("Please enter your OCR/query instruction.", "error")
             return
-        if len(str(text)) > MAX_INPUT_TOKEN_LENGTH * 8:
-            yield "[ERROR] Query is too long. Please shorten your input."
+        if len(str(text)) > MAX_INPUT_TOKEN_LENGTH * 4:
+            yield "[ERROR] Query is too long. Please shorten your input.", build_run_status("Query is too long.", "error")
             return
 
-        processor, model = select_model(model_name)
-
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": text},
-            ]
-        }]
-
-        prompt_full = processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-
-        inputs = processor(
-            text=[prompt_full],
-            images=[image],
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=MAX_INPUT_TOKEN_LENGTH
-        ).to(device)
-
-        streamer = TextIteratorStreamer(
-            processor.tokenizer if hasattr(processor, "tokenizer") else processor,
-            skip_prompt=True,
-            skip_special_tokens=True
-        )
-
-        generation_error = {"error": None}
-
-        generation_kwargs = {
-            **inputs,
-            "streamer": streamer,
-            "max_new_tokens": int(max_new_tokens),
-            "do_sample": True,
-            "temperature": float(temperature),
-            "top_p": float(top_p),
-            "top_k": int(top_k),
-            "repetition_penalty": float(repetition_penalty),
-        }
-
-        def _run_generation():
-            try:
-                model.generate(**generation_kwargs)
-            except Exception as e:
-                generation_error["error"] = e
-                try:
-                    streamer.end()
-                except Exception:
-                    pass
-
-        thread = Thread(target=_run_generation, daemon=True)
-        thread.start()
-
-        buffer = ""
-        for new_text in streamer:
-            buffer += new_text.replace("<|im_end|>", "")
-            time.sleep(0.01)
-            yield buffer
-
-        thread.join(timeout=1.0)
-
-        if generation_error["error"] is not None:
-            err_msg = f"[ERROR] Inference failed: {str(generation_error['error'])}"
-            if buffer.strip():
-                yield buffer + "\n\n" + err_msg
+        with LOCAL_MODEL_LOCK:
+            if is_local_model_cached(model_name):
+                yield "", build_run_status(f"Using cached {model_name}...", "running")
             else:
-                yield err_msg
-            return
+                yield "", build_run_status(f"Loading {model_name}...", "running")
 
-        if not buffer.strip():
-            yield "[ERROR] No output was generated."
+            processor, model, load_info = select_model(model_name)
+            if load_info["cache_hit"]:
+                running_status = f"Running OCR with cached {model_name}..."
+            else:
+                running_status = f"Running OCR with {model_name}..."
+                if load_info["evicted"]:
+                    evicted = ", ".join(load_info["evicted"])
+                    running_status = f"Loaded {model_name}. Evicted {evicted}."
+
+            yield "", build_run_status(running_status, "running")
+            inputs = build_model_inputs(model_name, processor, image, text)
+
+            streamer = TextIteratorStreamer(
+                processor.tokenizer if hasattr(processor, "tokenizer") else processor,
+                skip_prompt=True,
+                skip_special_tokens=True
+            )
+
+            generation_error = {"error": None}
+            generation_kwargs = {
+                **inputs,
+                "streamer": streamer,
+                "max_new_tokens": int(max_new_tokens),
+            }
+
+            if model_name == "GLM-OCR":
+                generation_kwargs["do_sample"] = False
+                generation_kwargs["repetition_penalty"] = 1.0
+            else:
+                generation_kwargs.update({
+                    "do_sample": True,
+                    "temperature": float(temperature),
+                    "top_p": float(top_p),
+                    "top_k": int(top_k),
+                    "repetition_penalty": float(repetition_penalty),
+                })
+
+            def _run_generation():
+                try:
+                    model.generate(**generation_kwargs)
+                except Exception as e:
+                    generation_error["error"] = e
+                    try:
+                        streamer.end()
+                    except Exception:
+                        pass
+
+            thread = Thread(target=_run_generation, daemon=True)
+            thread.start()
+
+            buffer = ""
+            for new_text in streamer:
+                buffer += new_text.replace("<|im_end|>", "")
+                time.sleep(0.01)
+                yield buffer, build_run_status(running_status, "running")
+
+            thread.join(timeout=1.0)
+
+            if generation_error["error"] is not None:
+                err_msg = f"[ERROR] Inference failed: {str(generation_error['error'])}"
+                if buffer.strip():
+                    yield buffer + "\n\n" + err_msg, build_run_status(f"Inference failed on {model_name}.", "error")
+                else:
+                    yield err_msg, build_run_status(f"Inference failed on {model_name}.", "error")
+                return
+
+            if not buffer.strip():
+                yield "[ERROR] No output was generated.", build_run_status(f"No output from {model_name}.", "error")
+                return
+
+            yield buffer, build_run_status(f"Finished with {model_name}.", "done")
 
     except Exception as e:
-        yield f"[ERROR] {str(e)}"
+        yield f"[ERROR] {str(e)}", build_run_status("OCR run failed.", "error")
     finally:
         gc.collect()
         if torch.cuda.is_available():
@@ -311,6 +623,25 @@ def generate_image(model_name, text, image, max_new_tokens, temperature, top_p, 
 
 def run_ocr(model_name, text, image_b64, max_new_tokens_v, temperature_v, top_p_v, top_k_v, repetition_penalty_v, gpu_timeout_v):
     try:
+        if model_name == DEEPSEEK_OCR_REMOTE_NAME:
+            if not image_b64:
+                yield "[ERROR] Please upload an image.", build_run_status("Please upload an image.", "error")
+                return
+            if not text or not str(text).strip():
+                yield "[ERROR] Please enter your OCR/query instruction.", build_run_status("Please enter your OCR/query instruction.", "error")
+                return
+            if len(str(text)) > MAX_INPUT_TOKEN_LENGTH * 4:
+                yield "[ERROR] Query is too long. Please shorten your input.", build_run_status("Query is too long.", "error")
+                return
+
+            yield from run_deepseek_remote(
+                text=text,
+                image_b64=image_b64,
+                max_new_tokens=max_new_tokens_v,
+                temperature=temperature_v,
+            )
+            return
+
         image = b64_to_pil(image_b64)
         yield from generate_image(
             model_name=model_name,
@@ -324,7 +655,7 @@ def run_ocr(model_name, text, image_b64, max_new_tokens_v, temperature_v, top_p_
             gpu_timeout=gpu_timeout_v,
         )
     except Exception as e:
-        yield f"[ERROR] {str(e)}"
+        yield f"[ERROR] {str(e)}", build_run_status("OCR run failed.", "error")
 
 
 def noop():
@@ -389,7 +720,10 @@ footer{display:none!important}
 }
 .model-tab:hover{background:rgba(173,255,47,.10);border-color:rgba(173,255,47,.35)}
 .model-tab.active{background:rgba(173,255,47,.18);border-color:#ADFF2F;color:#fff!important;box-shadow:0 0 0 2px rgba(173,255,47,.08)}
+.model-tab.disabled{opacity:.45;cursor:not-allowed;background:rgba(245,158,11,.06);border-color:rgba(245,158,11,.2)}
+.model-tab.disabled:hover{background:rgba(245,158,11,.06);border-color:rgba(245,158,11,.2);transform:none;box-shadow:none}
 .model-tab-label{font-size:12px;color:#ffffff!important;font-weight:600}
+.model-tab-hint{font-size:10px;color:#a1a1aa!important;text-transform:uppercase;letter-spacing:.5px}
 
 .app-main-row{display:flex;gap:0;flex:1;overflow:hidden}
 .app-main-left{flex:1;display:flex;flex-direction:column;min-width:0;border-right:1px solid #27272a}
@@ -632,6 +966,8 @@ body:not(.dark) .btn-run,body:not(.dark) .btn-run *,
     flex:0 0 auto;min-width:110px;text-align:center;justify-content:center;
     padding:3px 12px;background:rgba(173,255,47,.08);border-radius:6px;color:#D6FF8C;font-weight:500;
 }
+.app-statusbar .sb-section.sb-warning{background:rgba(245,158,11,.12);color:#fbbf24}
+.app-statusbar .sb-section.sb-ok{background:rgba(34,197,94,.12);color:#86efac}
 
 .exp-note{padding:10px 20px;font-size:12px;color:#52525b;border-top:1px solid #27272a;text-align:center}
 .exp-note a{color:#D6FF8C;text-decoration:none}
@@ -672,11 +1008,27 @@ function init() {
         return;
     }
 
+    let modelConfigs = {};
+    const modelConfigEl = document.getElementById('model-ui-config');
+    if (modelConfigEl) {
+        try {
+            modelConfigs = JSON.parse(modelConfigEl.textContent || '{}');
+        } catch (e) {
+            modelConfigs = {};
+        }
+    }
+    const knownDefaultPrompts = new Set(
+        Object.values(modelConfigs)
+            .map(config => (config && config.defaultPrompt ? String(config.defaultPrompt).trim() : ''))
+            .filter(Boolean)
+    );
+
     window.__ocr2GreenInitDone = true;
     let imageState = null;
     let toastTimer = null;
     let examplePoller = null;
     let lastSeenExamplePayload = null;
+    let lastAppliedModelName = null;
 
     function showToast(message, type) {
         let toast = document.getElementById('app-toast');
@@ -702,21 +1054,30 @@ function init() {
 
     function showLoader() {
         const l = document.getElementById('output-loader');
+        const loaderText = l ? l.querySelector('.loader-text') : null;
+        const message = arguments[0] || 'Processing...';
         if (l) l.classList.add('active');
+        if (loaderText) loaderText.textContent = message;
         const sb = document.getElementById('sb-run-state');
-        if (sb) sb.textContent = 'Processing...';
+        if (sb) sb.textContent = message;
     }
     function hideLoader() {
         const l = document.getElementById('output-loader');
+        const loaderText = l ? l.querySelector('.loader-text') : null;
+        const message = arguments[0] || 'Done';
         if (l) l.classList.remove('active');
+        if (loaderText) loaderText.textContent = message;
         const sb = document.getElementById('sb-run-state');
-        if (sb) sb.textContent = 'Done';
+        if (sb) sb.textContent = message;
     }
     function setRunErrorState() {
         const l = document.getElementById('output-loader');
+        const loaderText = l ? l.querySelector('.loader-text') : null;
+        const message = arguments[0] || 'Error';
         if (l) l.classList.remove('active');
+        if (loaderText) loaderText.textContent = message;
         const sb = document.getElementById('sb-run-state');
-        if (sb) sb.textContent = 'Error';
+        if (sb) sb.textContent = message;
     }
 
     window.__showToast = showToast;
@@ -771,6 +1132,94 @@ function init() {
 
     function syncModelToGradio(name) {
         setGradioValue('hidden-model-name', name);
+    }
+
+    function getModelConfig(name) {
+        return modelConfigs[name] || null;
+    }
+
+    function getActiveModelName() {
+        const active = document.querySelector('.model-tab.active');
+        return active ? active.getAttribute('data-model') : null;
+    }
+
+    function setSliderValue(customId, gradioId, value) {
+        const slider = document.getElementById(customId);
+        const valSpan = document.getElementById(customId + '-val');
+        if (!slider || value === undefined || value === null) return;
+
+        slider.value = String(value);
+        if (valSpan) valSpan.textContent = String(value);
+
+        const container = document.getElementById(gradioId);
+        if (!container) return;
+        container.querySelectorAll('input[type="range"],input[type="number"]').forEach(el => {
+            const ns = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+            if (ns && ns.set) {
+                ns.set.call(el, String(value));
+                el.dispatchEvent(new Event('input', {bubbles:true, composed:true}));
+                el.dispatchEvent(new Event('change', {bubbles:true, composed:true}));
+            }
+        });
+    }
+
+    function sliderMatchesDefaults(config) {
+        if (!config || !config.defaultSettings) return false;
+        const defaults = config.defaultSettings;
+        const checks = [
+            ['custom-max-new-tokens', defaults.maxNewTokens],
+            ['custom-temperature', defaults.temperature],
+            ['custom-top-p', defaults.topP],
+            ['custom-top-k', defaults.topK],
+            ['custom-repetition-penalty', defaults.repetitionPenalty],
+        ];
+        return checks.every(([id, value]) => {
+            const el = document.getElementById(id);
+            return el && String(el.value) === String(value);
+        });
+    }
+
+    function applyModelDefaults(name) {
+        const config = getModelConfig(name);
+        if (!config) {
+            lastAppliedModelName = name;
+            return;
+        }
+
+        const previousConfig = getModelConfig(lastAppliedModelName);
+        const currentPrompt = (promptInput.value || '').trim();
+        const previousPrompt = previousConfig && previousConfig.defaultPrompt ? String(previousConfig.defaultPrompt).trim() : '';
+        const nextPrompt = config.defaultPrompt ? String(config.defaultPrompt).trim() : '';
+        const shouldReplacePrompt = Boolean(nextPrompt) && (
+            !currentPrompt ||
+            knownDefaultPrompts.has(currentPrompt) ||
+            (previousPrompt && currentPrompt === previousPrompt)
+        );
+
+        if (shouldReplacePrompt) {
+            promptInput.value = nextPrompt;
+            syncPromptToGradio();
+        }
+
+        if (config.defaultSettings && (lastAppliedModelName === null || sliderMatchesDefaults(previousConfig))) {
+            setSliderValue('custom-max-new-tokens', 'gradio-max-new-tokens', config.defaultSettings.maxNewTokens);
+            setSliderValue('custom-temperature', 'gradio-temperature', config.defaultSettings.temperature);
+            setSliderValue('custom-top-p', 'gradio-top-p', config.defaultSettings.topP);
+            setSliderValue('custom-top-k', 'gradio-top-k', config.defaultSettings.topK);
+            setSliderValue('custom-repetition-penalty', 'gradio-repetition-penalty', config.defaultSettings.repetitionPenalty);
+        }
+
+        lastAppliedModelName = name;
+    }
+
+    function updateDeepSeekStatus() {
+        const el = document.getElementById('sb-deepseek-state');
+        const config = getModelConfig('DeepSeek-OCR');
+        if (!el || !config) return;
+
+        el.textContent = config.available ? 'DeepSeek endpoint configured' : 'DeepSeek endpoint not configured';
+        el.classList.remove('sb-warning', 'sb-ok');
+        el.classList.add(config.available ? 'sb-ok' : 'sb-warning');
     }
 
     function setPreview(b64, name) {
@@ -829,10 +1278,19 @@ function init() {
     promptInput.addEventListener('input', syncPromptToGradio);
 
     function activateModelTab(name) {
+        const config = getModelConfig(name);
+        if (config && !config.available) {
+            showToast(config.unavailableMessage || 'This model is currently unavailable', 'warning');
+            return false;
+        }
+
         document.querySelectorAll('.model-tab[data-model]').forEach(btn => {
             btn.classList.toggle('active', btn.getAttribute('data-model') === name);
         });
         syncModelToGradio(name);
+        applyModelDefaults(name);
+        updateDeepSeekStatus();
+        return true;
     }
     window.__activateModelTab = activateModelTab;
 
@@ -901,12 +1359,14 @@ function init() {
         syncImageToGradio();
         const active = document.querySelector('.model-tab.active');
         if (active) syncModelToGradio(active.getAttribute('data-model'));
+        setGradioValue('gradio-result', '');
+        setGradioValue('run-status-data', '');
         if (outputArea) outputArea.value = '';
-        showLoader();
+        showLoader('Preparing request...');
         setTimeout(() => {
             const gradioBtn = document.getElementById('gradio-run-btn');
             if (!gradioBtn) {
-                setRunErrorState();
+                setRunErrorState('Run button not found.');
                 if (outputArea) outputArea.value = '[ERROR] Run button not found.';
                 showToast('Run button not found', 'error');
                 return;
@@ -1062,6 +1522,7 @@ function init() {
     const sb = document.getElementById('sb-run-state');
     if (sb) sb.textContent = 'Ready';
     if (imgStatus) imgStatus.textContent = 'No image uploaded';
+    updateDeepSeekStatus();
 }
 init();
 }
@@ -1071,19 +1532,24 @@ wire_outputs_js = r"""
 () => {
 function watchOutputs() {
     const resultContainer = document.getElementById('gradio-result');
+    const statusContainer = document.getElementById('run-status-data');
     const outArea = document.getElementById('custom-output-textarea');
-    if (!resultContainer || !outArea) { setTimeout(watchOutputs, 500); return; }
+    if (!resultContainer || !statusContainer || !outArea) { setTimeout(watchOutputs, 500); return; }
 
     let lastText = '';
+    let lastStatus = '';
+
+    function getContainerValue(container) {
+        const el = container.querySelector('textarea') || container.querySelector('input');
+        return el ? (el.value || '') : '';
+    }
 
     function isErrorText(val) {
         return typeof val === 'string' && val.trim().startsWith('[ERROR]');
     }
 
     function syncOutput() {
-        const el = resultContainer.querySelector('textarea') || resultContainer.querySelector('input');
-        if (!el) return;
-        const val = el.value || '';
+        const val = getContainerValue(resultContainer);
         if (val !== lastText) {
             lastText = val;
             outArea.value = val;
@@ -1091,18 +1557,41 @@ function watchOutputs() {
 
             if (val.trim()) {
                 if (isErrorText(val)) {
-                    if (window.__setRunErrorState) window.__setRunErrorState();
                     if (window.__showToast) window.__showToast('Inference failed', 'error');
-                } else {
-                    if (window.__hideLoader) window.__hideLoader();
                 }
             }
         }
     }
 
+    function syncStatus() {
+        const raw = getContainerValue(statusContainer);
+        if (raw === lastStatus) return;
+        lastStatus = raw;
+        if (!raw) return;
+
+        try {
+            const payload = JSON.parse(raw);
+            const text = payload && payload.text ? payload.text : '';
+            const state = payload && payload.state ? payload.state : 'running';
+            if (state === 'done') {
+                if (window.__hideLoader) window.__hideLoader(text || 'Done');
+            } else if (state === 'error') {
+                if (window.__setRunErrorState) window.__setRunErrorState(text || 'Error');
+            } else {
+                if (window.__showLoader) window.__showLoader(text || 'Processing...');
+            }
+        } catch (e) {
+        }
+    }
+
     const observer = new MutationObserver(syncOutput);
     observer.observe(resultContainer, {childList:true, subtree:true, characterData:true, attributes:true});
-    setInterval(syncOutput, 500);
+    const statusObserver = new MutationObserver(syncStatus);
+    statusObserver.observe(statusContainer, {childList:true, subtree:true, characterData:true, attributes:true});
+    setInterval(() => {
+        syncOutput();
+        syncStatus();
+    }, 500);
 }
 watchOutputs();
 }
@@ -1129,10 +1618,7 @@ UPLOAD_PREVIEW_SVG = """
 COPY_SVG = """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M16 1H4C2.9 1 2 1.9 2 3v12h2V3h12V1zm3 4H8C6.9 5 6 5.9 6 7v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>"""
 SAVE_SVG = """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM7 5h8v4H7V5zm12 14H5v-6h14v6z"/></svg>"""
 
-MODEL_TABS_HTML = "".join([
-    f'<button class="model-tab{" active" if m == "Nanonets-OCR2-3B" else ""}" data-model="{m}"><span class="model-tab-label">{m}</span></button>'
-    for m in MODEL_CHOICES
-])
+MODEL_TABS_HTML = build_model_tabs_html()
 
 with gr.Blocks() as demo:
     hidden_image_b64 = gr.Textbox(value="", elem_id="hidden-image-b64", elem_classes="hidden-input", container=False)
@@ -1147,6 +1633,7 @@ with gr.Blocks() as demo:
     gpu_duration_state = gr.Number(value=60, elem_id="gradio-gpu-duration", elem_classes="hidden-input", container=False)
 
     result = gr.Textbox(value="", elem_id="gradio-result", elem_classes="hidden-input", container=False)
+    run_status = gr.Textbox(value="", elem_id="run-status-data", elem_classes="hidden-input", container=False)
 
     example_idx = gr.Textbox(value="", elem_id="example-idx-input", elem_classes="hidden-input", container=False)
     example_result = gr.Textbox(value="", elem_id="example-result-data", elem_classes="hidden-input", container=False)
@@ -1154,6 +1641,7 @@ with gr.Blocks() as demo:
 
     gr.HTML(f"""
     <div class="app-shell">
+        <script id="model-ui-config" type="application/json">{MODEL_UI_CONFIGS_JSON}</script>
         <div class="app-header">
             <div class="app-header-left">
                 <div class="app-logo">{OCR_LOGO_SVG}</div>
@@ -1285,6 +1773,7 @@ with gr.Blocks() as demo:
         <div class="app-statusbar">
             <div class="sb-section" id="sb-image-status">No image uploaded</div>
             <div class="sb-section sb-fixed" id="sb-run-state">Ready</div>
+            <div class="sb-section sb-fixed {DEEPSEEK_STATUS_CLASS}" id="sb-deepseek-state">{DEEPSEEK_STATUS_TEXT}</div>
         </div>
     </div>
     """)
@@ -1307,7 +1796,7 @@ with gr.Blocks() as demo:
             repetition_penalty,
             gpu_duration_state,
         ],
-        outputs=[result],
+        outputs=[result, run_status],
         js=r"""(m, p, img, mnt, t, tp, tk, rp, gd) => {
             const modelEl = document.querySelector('.model-tab.active');
             const model = modelEl ? modelEl.getAttribute('data-model') : m;
