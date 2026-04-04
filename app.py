@@ -3,6 +3,7 @@ import gc
 import json
 import base64
 import time
+import logging
 import requests
 from collections import OrderedDict
 from io import BytesIO
@@ -12,6 +13,7 @@ import gradio as gr
 import spaces
 import torch
 from PIL import Image
+from dotenv import load_dotenv
 
 from transformers import (
     Qwen2VLForConditionalGeneration,
@@ -20,6 +22,14 @@ from transformers import (
     AutoProcessor,
     TextIteratorStreamer,
 )
+
+
+load_dotenv()
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(levelname)s %(message)s",
+)
+LOGGER = logging.getLogger("multimodal_ocr")
 
 
 MAX_MAX_NEW_TOKENS = 4096
@@ -39,19 +49,21 @@ except ValueError:
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-print("CUDA_VISIBLE_DEVICES=", os.environ.get("CUDA_VISIBLE_DEVICES"))
-print("torch.__version__ =", torch.__version__)
-print("torch.version.cuda =", torch.version.cuda)
-print("cuda available:", torch.cuda.is_available())
-print("cuda device count:", torch.cuda.device_count())
+LOGGER.info("CUDA_VISIBLE_DEVICES=%s", os.environ.get("CUDA_VISIBLE_DEVICES"))
+LOGGER.info("torch.__version__=%s", torch.__version__)
+LOGGER.info("torch.version.cuda=%s", torch.version.cuda)
+LOGGER.info("cuda available=%s", torch.cuda.is_available())
+LOGGER.info("cuda device count=%s", torch.cuda.device_count())
 if torch.cuda.is_available():
-    print("current device:", torch.cuda.current_device())
-    print("device name:", torch.cuda.get_device_name(torch.cuda.current_device()))
+    LOGGER.info("current device=%s", torch.cuda.current_device())
+    LOGGER.info("device name=%s", torch.cuda.get_device_name(torch.cuda.current_device()))
 else:
-    print("WARNING: No CUDA device detected. Local models will run on CPU in float32, "
-          "which may be extremely slow or fail for large vision-language models. "
-          "A CUDA-capable GPU is strongly recommended.")
-print("Using device:", device)
+    LOGGER.warning(
+        "No CUDA device detected. Local models will run on CPU in float32, "
+        "which may be extremely slow or fail for large vision-language models. "
+        "A CUDA-capable GPU is strongly recommended."
+    )
+LOGGER.info("Using device=%s", device)
 
 _COMMON_PROCESSOR_KWARGS = {"trust_remote_code": True}
 _COMMON_MODEL_KWARGS = {
@@ -59,6 +71,13 @@ _COMMON_MODEL_KWARGS = {
     "trust_remote_code": True,
     "torch_dtype": torch.float16,
 }
+_DEFAULT_MODEL_RUNTIME_CONFIG = {
+    "doSample": True,
+    "useSamplingControls": True,
+    "fixedRepetitionPenalty": None,
+    "streamCleanupTokens": [],
+}
+_QWEN_STREAM_CLEANUP_TOKENS = ["<|im_end|>"]
 
 LOCAL_MODEL_SPECS = {
     "Nanonets-OCR2-3B": {
@@ -196,6 +215,16 @@ MODEL_UI_CONFIGS = {
     },
 }
 
+for _model_name in ("Nanonets-OCR2-3B", "olmOCR-7B-0725", "RolmOCR-7B", "Qwen2-VL-OCR-2B"):
+    MODEL_UI_CONFIGS[_model_name]["runtimeConfig"] = {
+        "streamCleanupTokens": list(_QWEN_STREAM_CLEANUP_TOKENS),
+    }
+MODEL_UI_CONFIGS["GLM-OCR"]["runtimeConfig"] = {
+    "doSample": False,
+    "useSamplingControls": False,
+    "fixedRepetitionPenalty": 1.0,
+}
+
 MODEL_CHOICES = list(LOCAL_MODEL_SPECS.keys()) + [DEEPSEEK_OCR_REMOTE_NAME]
 MODEL_UI_CONFIGS_JSON = json.dumps(MODEL_UI_CONFIGS)
 DEEPSEEK_STATUS_TEXT = "DeepSeek endpoint configured" if DEEPSEEK_OCR_CONFIGURED else "DeepSeek endpoint not configured"
@@ -205,12 +234,12 @@ LOCAL_MODEL_CACHE = OrderedDict()
 
 image_examples = [
     {"query": "Perform OCR on the image precisely.", "image": "examples/5.jpg", "model": "Nanonets-OCR2-3B"},
-    {"query": "Text Recognition:", "image": "examples/5.jpg", "model": "GLM-OCR"},
+    {"query": "Text Recognition:", "image": "examples/6.png", "model": "GLM-OCR"},
     {"query": "Run OCR on the image and ensure high accuracy.", "image": "examples/4.jpg", "model": "olmOCR-7B-0725"},
     {"query": "Conduct OCR on the image with exact text recognition.", "image": "examples/2.jpg", "model": "RolmOCR-7B"},
     {"query": "Perform precise OCR extraction on the image.", "image": "examples/1.jpg", "model": "Qwen2-VL-OCR-2B"},
     {"query": "Describe the visual content and extract visible text from the image.", "image": "examples/3.jpg", "model": "Aya-Vision-8B"},
-    {"query": "Convert the document to markdown.", "image": "examples/4.jpg", "model": DEEPSEEK_OCR_REMOTE_NAME},
+    {"query": "Convert the document to markdown.", "image": "examples/7.png", "model": DEEPSEEK_OCR_REMOTE_NAME},
 ]
 
 
@@ -242,6 +271,28 @@ def build_model_tabs_html():
     return "".join(cards)
 
 
+def normalize_max_new_tokens(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = DEFAULT_MAX_NEW_TOKENS
+    return max(1, min(parsed, MAX_MAX_NEW_TOKENS))
+
+
+def get_model_runtime_config(model_name: str):
+    config = dict(_DEFAULT_MODEL_RUNTIME_CONFIG)
+    config.update(MODEL_UI_CONFIGS.get(model_name, {}).get("runtimeConfig", {}))
+    config["streamCleanupTokens"] = list(config.get("streamCleanupTokens", []))
+    return config
+
+
+def strip_stream_tokens(text: str, cleanup_tokens):
+    cleaned_text = text
+    for token in cleanup_tokens:
+        cleaned_text = cleaned_text.replace(token, "")
+    return cleaned_text
+
+
 def get_local_model_load_kwargs(spec):
     kwargs = dict(spec["model_kwargs"])
     if not torch.cuda.is_available():
@@ -262,6 +313,11 @@ def unload_local_model():
 
 def is_local_model_cached(model_name: str):
     return model_name in LOCAL_MODEL_CACHE
+
+
+def is_local_model_cached_thread_safe(model_name: str):
+    with LOCAL_MODEL_LOCK:
+        return model_name in LOCAL_MODEL_CACHE
 
 
 def evict_oldest_local_model():
@@ -291,7 +347,7 @@ def load_local_model(model_name: str):
         evicted_models.append(evicted_name)
 
     spec = LOCAL_MODEL_SPECS[model_name]
-    print(f"Loading model: {model_name}")
+    LOGGER.info("Loading model: %s", model_name)
 
     processor = None
     model = None
@@ -349,7 +405,7 @@ def make_thumb_b64(path, max_dim=240):
         img.thumbnail((max_dim, max_dim))
         return pil_to_data_url(img, "JPEG")
     except Exception as e:
-        print("Thumbnail error:", e)
+        LOGGER.warning("Thumbnail error for %s: %s", path, e)
         return ""
 
 
@@ -370,9 +426,6 @@ def build_example_cards_html():
         </div>
         """
     return cards
-
-
-EXAMPLE_CARDS_HTML = build_example_cards_html()
 
 
 def load_example_data(idx_str):
@@ -424,7 +477,7 @@ def calc_timeout_duration(*args, **kwargs):
     except Exception:
         duration = 60
 
-    if model_name in LOCAL_MODEL_SPECS and not is_local_model_cached(model_name):
+    if model_name in LOCAL_MODEL_SPECS and not is_local_model_cached_thread_safe(model_name):
         return max(duration, 180)
     return duration
 
@@ -472,6 +525,8 @@ def run_deepseek_remote(text, image_b64, max_new_tokens, temperature):
     if DEEPSEEK_OCR_API_KEY:
         headers["Authorization"] = f"Bearer {DEEPSEEK_OCR_API_KEY}"
 
+    bounded_max_tokens = normalize_max_new_tokens(max_new_tokens)
+
     yield "", build_run_status("Calling DeepSeek-OCR endpoint...", "running")
 
     payload = {
@@ -483,7 +538,7 @@ def run_deepseek_remote(text, image_b64, max_new_tokens, temperature):
                 {"type": "text", "text": prompt_text},
             ],
         }],
-        "max_tokens": int(max_new_tokens),
+        "max_tokens": bounded_max_tokens,
         "temperature": float(temperature),
         "extra_body": {
             "skip_special_tokens": False,
@@ -552,6 +607,7 @@ def generate_image(model_name, text, image, max_new_tokens, temperature, top_p, 
 
             yield "", build_run_status(running_status, "running")
             inputs = build_model_inputs(model_name, processor, image, text)
+            runtime_config = get_model_runtime_config(model_name)
 
             streamer = TextIteratorStreamer(
                 processor.tokenizer if hasattr(processor, "tokenizer") else processor,
@@ -564,19 +620,18 @@ def generate_image(model_name, text, image, max_new_tokens, temperature, top_p, 
                 **inputs,
                 "streamer": streamer,
                 "max_new_tokens": int(max_new_tokens),
+                "do_sample": bool(runtime_config["doSample"]),
             }
 
-            if model_name == "GLM-OCR":
-                generation_kwargs["do_sample"] = False
-                generation_kwargs["repetition_penalty"] = 1.0
-            else:
+            if runtime_config["useSamplingControls"]:
                 generation_kwargs.update({
-                    "do_sample": True,
                     "temperature": float(temperature),
                     "top_p": float(top_p),
                     "top_k": int(top_k),
                     "repetition_penalty": float(repetition_penalty),
                 })
+            elif runtime_config["fixedRepetitionPenalty"] is not None:
+                generation_kwargs["repetition_penalty"] = float(runtime_config["fixedRepetitionPenalty"])
 
             def _run_generation():
                 try:
@@ -593,11 +648,15 @@ def generate_image(model_name, text, image, max_new_tokens, temperature, top_p, 
 
             buffer = ""
             for new_text in streamer:
-                buffer += new_text.replace("<|im_end|>", "")
+                buffer = strip_stream_tokens(buffer + new_text, runtime_config["streamCleanupTokens"])
                 time.sleep(0.01)
                 yield buffer, build_run_status(running_status, "running")
 
-            thread.join(timeout=1.0)
+            try:
+                join_timeout = max(1.0, float(gpu_timeout))
+            except (TypeError, ValueError):
+                join_timeout = 60.0
+            thread.join(timeout=join_timeout)
 
             if generation_error["error"] is not None:
                 err_msg = f"[ERROR] Inference failed: {str(generation_error['error'])}"
@@ -643,6 +702,9 @@ def run_ocr(model_name, text, image_b64, max_new_tokens_v, temperature_v, top_p_
             return
 
         image = b64_to_pil(image_b64)
+        if image is None:
+            yield "[ERROR] Could not read the uploaded image.", build_run_status("Could not read the uploaded image.", "error")
+            return
         yield from generate_image(
             model_name=model_name,
             text=text,
@@ -1618,8 +1680,6 @@ UPLOAD_PREVIEW_SVG = """
 COPY_SVG = """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M16 1H4C2.9 1 2 1.9 2 3v12h2V3h12V1zm3 4H8C6.9 5 6 5.9 6 7v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>"""
 SAVE_SVG = """<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM7 5h8v4H7V5zm12 14H5v-6h14v6z"/></svg>"""
 
-MODEL_TABS_HTML = build_model_tabs_html()
-
 with gr.Blocks() as demo:
     hidden_image_b64 = gr.Textbox(value="", elem_id="hidden-image-b64", elem_classes="hidden-input", container=False)
     prompt = gr.Textbox(value="", elem_id="prompt-gradio-input", elem_classes="hidden-input", container=False)
@@ -1652,7 +1712,7 @@ with gr.Blocks() as demo:
         </div>
 
         <div class="model-tabs-bar">
-            {MODEL_TABS_HTML}
+            {build_model_tabs_html()}
         </div>
 
         <div class="app-main-row">
@@ -1688,7 +1748,7 @@ with gr.Blocks() as demo:
                 <div class="examples-section">
                     <div class="examples-title">Quick Examples</div>
                     <div class="examples-scroll">
-                        {EXAMPLE_CARDS_HTML}
+                        {build_example_cards_html()}
                     </div>
                 </div>
             </div>
